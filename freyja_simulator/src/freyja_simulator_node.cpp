@@ -25,6 +25,18 @@ typedef geometry_msgs::msg::TransformStamped TFStamped;
 typedef geometry_msgs::msg::Twist BodyTwist;
 typedef nav_msgs::msg::Odometry   Odom;
 
+namespace fast_approx
+{
+  constexpr double fact3 = 3.0*2.0;
+  constexpr double fact5 = 5.0*4.0*fact3;
+  constexpr double cube(const double &x) { return x*x*x; }
+
+  constexpr double sine(const double &a)
+    { return a - cube(a)/fact3 + a*a*cube(a)/fact5; }
+  constexpr double cosine(const double &a)
+    { return 1.0 - a*a/2.0 + a*cube(a)/(4*fact3); }
+}
+
 struct DiffDriveRobot
 {
   double x_, y_, theta_;
@@ -104,14 +116,14 @@ void DiffDriveRobot::move( const double& dt )
 {
   if( std::fabs(bw_) < 0.005 )
   {
-    vx_ = bv_*dt*std::cos( theta_ + bw_*dt );
-    vy_ = bv_*dt*std::sin( theta_ + bw_*dt );
+    vx_ = bv_*dt*fast_approx::cosine( theta_ + bw_*dt );
+    vy_ = bv_*dt*fast_approx::sine( theta_ + bw_*dt );
   }
   else
   {
     double r = (bv_/bw_);
-    vx_ = -r*( std::sin(theta_) - std::sin(theta_ + bw_*dt) );
-    vy_ = r * ( std::cos(theta_) - std::cos(theta_ + bw_*dt) );
+    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(theta_ + bw_*dt) );
+    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(theta_ + bw_*dt) );
   }
   
   x_ += vx_;
@@ -153,7 +165,7 @@ class FreyjaSimulator : public rclcpp::Node
 {
   int num_robots_;
   std::vector<long int> robot_num_range_;
-  double WALL_LIMIT;
+  std::vector<double> spawn_limits_xy_;
   
   double sim_step_;
   double topic_step_;
@@ -192,6 +204,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 {
   double refresh_rate, topic_rate;
   declare_parameter<std::vector<long int>>( "robot_num_range", std::vector<long int>({3, 7}) );
+  declare_parameter<std::vector<double>>( "spawn_limits_xy", std::vector<double>({-2.0, 2.0}) );
   declare_parameter<double>("sim_rate", 50.0);
   declare_parameter<double>("topic_rate", 30.0);
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
@@ -199,10 +212,11 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<bool>( "enable_collisions", false );
   
   get_parameter( "robot_num_range", robot_num_range_ );
+  get_parameter( "spawn_limits_xy", spawn_limits_xy_ );
   get_parameter( "sim_rate", refresh_rate );
   get_parameter( "topic_rate", topic_rate );
   get_parameter( "enable_collisions", enable_collisions_ );
-  WALL_LIMIT = 2.0;
+  
 
 
 
@@ -239,15 +253,16 @@ void FreyjaSimulator::create_robots()
 {
   std::random_device rd;
   std::default_random_engine rand_engine(rd());
-  std::uniform_real_distribution<> pos_dist(-WALL_LIMIT, WALL_LIMIT);
+  std::uniform_real_distribution<> xpos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
+  std::uniform_real_distribution<> ypos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
   std::uniform_real_distribution<> theta_dist(-3.14, 3.14);
   std::uniform_int_distribution<> uid_dist(200,300);
 
   int idx = 0;
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
   {
-    double x = pos_dist(rand_engine);
-    double y = pos_dist(rand_engine);
+    double x = xpos_distrib(rand_engine);
+    double y = ypos_distrib(rand_engine);
     double th = theta_dist(rand_engine);
     int uid = uid_dist(rand_engine);
     std::string rname = "robot" + std::to_string(r);
