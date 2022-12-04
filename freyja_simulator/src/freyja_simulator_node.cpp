@@ -27,14 +27,21 @@ typedef nav_msgs::msg::Odometry   Odom;
 
 namespace fast_approx
 {
+  constexpr double pii = 3.14159;
   constexpr double fact3 = 3.0*2.0;
   constexpr double fact5 = 5.0*4.0*fact3;
+  constexpr double fact7 = 7.0*6.0*fact5;
   constexpr double cube(const double &x) { return x*x*x; }
-
+  constexpr double constrainAngleRad( double x )
+  {
+    // limit angle to [-pi,pi]
+    x = std::fmod(x+pii,2*pii);
+    return( x < 0 ? x+pii : x-pii );
+  }
   constexpr double sine(const double &a)
-    { return a - cube(a)/fact3 + a*a*cube(a)/fact5; }
+    { return a - cube(a)/fact3 + a*a*cube(a)/fact5 - a*cube(a)*cube(a)/fact7; }
   constexpr double cosine(const double &a)
-    { return 1.0 - a*a/2.0 + a*cube(a)/(4*fact3); }
+    { return 1.0 - a*a/2.0 + a*cube(a)/(4*fact3) - cube(a)*cube(a)/(6*fact5); }
 }
 
 struct DiffDriveRobot
@@ -114,21 +121,22 @@ void DiffDriveRobot::setBodyVelocity( const double body_v, const double body_w )
 }
 void DiffDriveRobot::move( const double& dt )
 {
+  double new_theta = fast_approx::constrainAngleRad( theta_ + bw_*dt );
   if( std::fabs(bw_) < 0.005 )
   {
-    vx_ = bv_*dt*fast_approx::cosine( theta_ + bw_*dt );
-    vy_ = bv_*dt*fast_approx::sine( theta_ + bw_*dt );
+    vx_ = bv_*dt*fast_approx::cosine( new_theta );
+    vy_ = bv_*dt*fast_approx::sine( new_theta );
   }
   else
   {
     double r = (bv_/bw_);
-    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(theta_ + bw_*dt) );
-    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(theta_ + bw_*dt) );
+    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
+    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
   }
   
   x_ += vx_;
   y_ += vy_;
-  theta_ += bw_*dt; 
+  theta_ = new_theta; 
 }
 
 void DiffDriveRobot::manager_process()
