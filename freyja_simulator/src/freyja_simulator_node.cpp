@@ -7,6 +7,7 @@
 #include <chrono>
 #include <atomic>
 #include <cmath>
+#include <functional>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -21,30 +22,15 @@
 
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "fast_approximate_math.hpp"
+
 typedef geometry_msgs::msg::TransformStamped TFStamped;
 typedef geometry_msgs::msg::Twist BodyTwist;
 typedef nav_msgs::msg::Odometry   Odom;
 
-namespace fast_approx
-{
-  constexpr double pii = 3.14159;
-  constexpr double fact3 = 3.0*2.0;
-  constexpr double fact5 = 5.0*4.0*fact3;
-  constexpr double fact7 = 7.0*6.0*fact5;
-  constexpr double cube(const double &x) { return x*x*x; }
-  constexpr double constrainAngleRad( double x )
-  {
-    // limit angle to [-pi,pi]
-    x = std::fmod(x+pii,2*pii);
-    return( x < 0 ? x+pii : x-pii );
-  }
-  constexpr double sine(const double &a)
-    { return a - cube(a)/fact3 + a*a*cube(a)/fact5 - a*cube(a)*cube(a)/fact7; }
-  constexpr double cosine(const double &a)
-    { return 1.0 - a*a/2.0 + a*cube(a)/(4*fact3) - cube(a)*cube(a)/(6*fact5); }
-}
 
-struct DiffDriveRobot
+
+struct GenericRobot
 {
   double x_, y_, theta_;
   double vx_, vy_, omega_;
@@ -52,6 +38,7 @@ struct DiffDriveRobot
 
   int unique_id_;
   std::string name_;
+  int robot_type_;      // 0: diffdrive, 1: holonimic
   
   volatile bool is_ok_;
   std::atomic_flag keep_alive_;
@@ -61,19 +48,19 @@ struct DiffDriveRobot
   const double MAX_ANGULAR_SPD_=2.0;
 
   public:
-    DiffDriveRobot( int, std::string );
+    GenericRobot( int, std::string, int );
     // forbid copy
-    DiffDriveRobot( const DiffDriveRobot& ) = delete;
-    DiffDriveRobot& operator=( const DiffDriveRobot& ) = delete;
+    GenericRobot( const GenericRobot& ) = delete;
+    GenericRobot& operator=( const GenericRobot& ) = delete;
     // allow move
-    DiffDriveRobot( DiffDriveRobot&& d): unique_id_(d.unique_id_), name_(std::move(d.name_))
+    GenericRobot( GenericRobot&& d): unique_id_(d.unique_id_), name_(std::move(d.name_)), robot_type_(d.robot_type_)
     {
       x_ = d.x_; y_ = d.y_; theta_ = d.theta_;
       vx_ = d.vx_; vy_ = d.vy_; omega_ = d.omega_;
     }
-    DiffDriveRobot& operator=( DiffDriveRobot&& ) = default;
+    GenericRobot& operator=( GenericRobot&& ) = default;
     // explicit destructor for handling shutdown
-    ~DiffDriveRobot();
+    ~GenericRobot();
 
     void initialise_stopped( const double& _x, const double& _y, const double& _th );
     void setVelocity( const double& _vx, const double& _vy, const double& _w );
@@ -85,23 +72,34 @@ struct DiffDriveRobot
     
     void alert_problem() { is_ok_ = false; }
     void terminate() { keep_alive_.clear(std::memory_order_release); }
-    void move( const double& dt );
+    
+    std::function<void(const double&)> moveRobotDyn;
+    void moveRobotDiffDrive( const double& dt );
+    void moveRobotHolonomic( const double& dt );
     void manager_process();
 
 };
 
-DiffDriveRobot::~DiffDriveRobot()
+GenericRobot::~GenericRobot()
 {
   terminate();
 }
 
-DiffDriveRobot::DiffDriveRobot( int _uid, std::string _n ): unique_id_(_uid), name_(std::move(_n))
+GenericRobot::GenericRobot( int _uid, std::string _n, int _type ) : 
+                                    unique_id_(_uid),
+                                    name_(std::move(_n)),
+                                    robot_type_(_type)
 {
   x_ = y_ = theta_ = std::nan("");
   vx_ = vy_ = omega_ = std::nan("");
   is_ok_ = false;
+  // associate dynamics model function
+  if( robot_type_ == 0 )
+    moveRobotDyn = std::bind( &GenericRobot::moveRobotDiffDrive, this, std::placeholders::_1 );
+  else
+    moveRobotDyn = std::bind( &GenericRobot::moveRobotHolonomic, this, std::placeholders::_1 );
 }
-void DiffDriveRobot::initialise_stopped( const double& _x, const double& _y, const double& _th )
+void GenericRobot::initialise_stopped( const double& _x, const double& _y, const double& _th )
 {
   x_ = _x;
   y_ = _y;
@@ -114,12 +112,32 @@ void DiffDriveRobot::initialise_stopped( const double& _x, const double& _y, con
               name_.c_str(), x_, y_, theta_, vx_, vy_, omega_ );
 }
 
-void DiffDriveRobot::setBodyVelocity( const double body_v, const double body_w )
+void GenericRobot::setBodyVelocity( const double body_vx, const double body_w )
 {
-  bv_ = std::min( MAX_LINEAR_SPD_, std::max(-MAX_LINEAR_SPD_, body_v) );
+  bv_ = std::min( MAX_LINEAR_SPD_, std::max(-MAX_LINEAR_SPD_, body_vx) );
   bw_ = std::min( MAX_ANGULAR_SPD_, std::max(-MAX_ANGULAR_SPD_, body_w) );
 }
-void DiffDriveRobot::move( const double& dt )
+void GenericRobot::moveRobotDiffDrive( const double& dt )
+{
+  double new_theta = fast_approx::constrainAngleRad( theta_ + bw_*dt );
+  if( fast_approx::fastabs(bw_) < 0.005 )
+  {
+    vx_ = bv_*dt*fast_approx::cosine( new_theta );
+    vy_ = bv_*dt*fast_approx::sine( new_theta );
+  }
+  else
+  {
+    double r = (bv_/bw_);
+    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
+    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
+  }
+  
+  x_ += vx_;
+  y_ += vy_;
+  theta_ = new_theta; 
+}
+
+void GenericRobot::moveRobotHolonomic( const double& dt )
 {
   double new_theta = fast_approx::constrainAngleRad( theta_ + bw_*dt );
   if( std::fabs(bw_) < 0.005 )
@@ -139,7 +157,7 @@ void DiffDriveRobot::move( const double& dt )
   theta_ = new_theta; 
 }
 
-void DiffDriveRobot::manager_process()
+void GenericRobot::manager_process()
 {
   const double dt = 0.01;
   const int dt_ms = std::round(dt*1000.0);
@@ -150,7 +168,7 @@ void DiffDriveRobot::manager_process()
   {
     if( is_ok_ )
     {
-      move(dt);
+      moveRobotDyn(dt);
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }
     else
@@ -180,7 +198,7 @@ class FreyjaSimulator : public rclcpp::Node
 
   visualization_msgs::msg::Marker robot_markers_;
 
-  std::vector<DiffDriveRobot> robots_;
+  std::vector<GenericRobot> robots_;
   std::vector<std::thread> robot_mgrs_;
   bool enable_collisions_;
 
@@ -198,9 +216,9 @@ class FreyjaSimulator : public rclcpp::Node
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr rviz_marker_pub_;
     void simulation_setup();
     
-    void create_robots();
+    void create_robots( int );
     void proper_shutdown();
-    bool collides(const DiffDriveRobot&, const DiffDriveRobot& );
+    bool collides(const GenericRobot&, const GenericRobot& );
 
 };
 
@@ -210,7 +228,6 @@ FreyjaSimulator::~FreyjaSimulator()
 
 FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 {
-  double refresh_rate, topic_rate;
   declare_parameter<std::vector<long int>>( "robot_num_range", std::vector<long int>({3, 7}) );
   declare_parameter<std::vector<double>>( "spawn_limits_xy", std::vector<double>({-2.0, 2.0}) );
   declare_parameter<double>("sim_rate", 50.0);
@@ -218,15 +235,18 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
   declare_parameter<int>( "team_id", 0 );
   declare_parameter<bool>( "enable_collisions", false );
+  declare_parameter<std::string>( "robot_type", "diffdrive" );
   
+  double refresh_rate, topic_rate;
+  std::string robot_type_str;
+  int robots_type = 0;
   get_parameter( "robot_num_range", robot_num_range_ );
   get_parameter( "spawn_limits_xy", spawn_limits_xy_ );
   get_parameter( "sim_rate", refresh_rate );
   get_parameter( "topic_rate", topic_rate );
   get_parameter( "enable_collisions", enable_collisions_ );
+  get_parameter( "robots_type", robot_type_str );
   
-
-
 
   // pre-setup
   num_robots_ = int( robot_num_range_[1] - robot_num_range_[0] + 1 );
@@ -236,8 +256,13 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   all_tforms_.resize(num_robots_);
   odom_pubs_.resize(num_robots_);
 
+  if( robot_type_str == "diffdrive" )
+    robots_type = 0;
+  else if( robot_type_str == "holonomic" )
+    robots_type = 1;
+
   // instantiate all robots
-  create_robots();
+  create_robots( robots_type );
   
   // set up extra pieces of simulation
   simulation_setup();
@@ -257,7 +282,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   std::cout << std::endl;
 }
 
-void FreyjaSimulator::create_robots()
+void FreyjaSimulator::create_robots( int robots_type )
 {
   std::random_device rd;
   std::default_random_engine rand_engine(rd());
@@ -274,7 +299,7 @@ void FreyjaSimulator::create_robots()
     double th = theta_dist(rand_engine);
     int uid = uid_dist(rand_engine);
     std::string rname = "robot" + std::to_string(r);
-    robots_.emplace_back( uid, rname );
+    robots_.emplace_back( uid, rname, robots_type );
     robots_[idx].initialise_stopped( x, y, th );
     // create subscriber
     cmd_subs_[idx] = create_subscription<BodyTwist> ( rname + "/cmd_vel", 1,
@@ -285,7 +310,7 @@ void FreyjaSimulator::create_robots()
   }
   printf( "All robots created. Starting managers..\n" );
   for(int idx=0; idx<num_robots_; idx++ )
-    robot_mgrs_.push_back( std::move(std::thread(&DiffDriveRobot::manager_process, &robots_[idx])) );
+    robot_mgrs_.push_back( std::move(std::thread(&GenericRobot::manager_process, &robots_[idx])) );
 }
 
 void FreyjaSimulator::simulation_setup()
@@ -309,7 +334,7 @@ void FreyjaSimulator::simulation_setup()
   robot_markers_.points.resize(num_robots_);
 }
 
-bool FreyjaSimulator::collides( const DiffDriveRobot& r1, const DiffDriveRobot& r2 )
+bool FreyjaSimulator::collides( const GenericRobot& r1, const GenericRobot& r2 )
 {
   static double r1x, r1y, r2x, r2y;
   static double th;

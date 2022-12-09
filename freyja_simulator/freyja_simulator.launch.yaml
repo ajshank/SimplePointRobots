@@ -8,10 +8,11 @@ launch:
       exec:       "freyja_simulator_node"
       output:     "screen"
       param:
-      - { name:   "robot_num_range",    value:  [3, 5] }          # [i,j] robots numbered [ri..rj]
+      - { name:   "robot_num_range",    value:  [3, 15] }         # [i,j] robots numbered [ri..rj]
       - { name:   "spawn_limits_xy",    value:  [-2.0, 2.0] }     # [m,n] init in area x:[m,n] y:[m,n]
       - { name:   "team_color",         value:  [0.7, 0.0, 0.0] } # marker color, rgb
       - { name:   "team_id",            value:  0 }               # common id for these robots
       - { name:   "sim_rate",           value:  50.0 }            # main sim rate, robot sim at (fixed) high rate
       - { name:   "topic_rate",         value:  30.0 }            # topics updated at this rate
-      - { name:   "enable_collisions",  value:  false }           # naive quadratic collision handling
+      - { name:   "enable_collisions",  value:  true }            # naive quadratic collision handling
+      - { name:   "robots_type",        value:  "holonomic" }     # holonomic or diffdrive
