@@ -16,3 +16,4 @@ launch:
       - { name:   "topic_rate",         value:  30.0 }            # topics updated at this rate
       - { name:   "enable_collisions",  value:  false }            # naive quadratic collision handling
       - { name:   "robots_type",        value:  "holonomic" }     # holonomic or diffdrive
+      - { name:   "obst_pos_list",      value:  [0.7, 0.0, 0.0, 0.0] }

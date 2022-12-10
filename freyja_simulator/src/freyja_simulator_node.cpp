@@ -189,11 +189,16 @@ class FreyjaSimulator : public rclcpp::Node
   double sim_step_;
   double topic_step_;
 
-  visualization_msgs::msg::Marker robot_markers_;
 
+  // robots and managers
   std::vector<GenericRobot> robots_;
   std::vector<std::thread> robot_mgrs_;
   bool enable_collisions_;
+  visualization_msgs::msg::Marker robot_markers_;
+
+  // global visualization obstacles
+  std::vector<double> obst_pos_list_;
+  visualization_msgs::msg::MarkerArray obst_markers_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::vector<rclcpp::Subscription<BodyTwist>::SharedPtr> cmd_subs_;
@@ -206,7 +211,8 @@ class FreyjaSimulator : public rclcpp::Node
     rclcpp::TimerBase::SharedPtr tf_timer_;
     void timerTfCallback() __attribute__((hot));
 
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr rviz_marker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr rviz_robotmarker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr rviz_obstmarker_pub_;
     void simulation_setup();
     
     void create_robots( int );
@@ -229,6 +235,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<int>( "team_id", 0 );
   declare_parameter<bool>( "enable_collisions", false );
   declare_parameter<std::string>( "robots_type", "diffdrive" );
+  declare_parameter<std::vector<double>>( "obst_pos_list", std::vector<double>({-1.0}) );
   
   double refresh_rate, topic_rate;
   std::string robot_type_str;
@@ -239,7 +246,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   get_parameter( "topic_rate", topic_rate );
   get_parameter( "enable_collisions", enable_collisions_ );
   get_parameter( "robots_type", robot_type_str );
-  
+  get_parameter( "obst_pos_list", obst_pos_list_ );
 
   // pre-setup
   num_robots_ = int( robot_num_range_[1] - robot_num_range_[0] + 1 );
@@ -256,15 +263,15 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 
   // instantiate all robots
   create_robots( robots_type );
-  
-  // set up extra pieces of simulation
-  simulation_setup();
 
   // set up broadcaster
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   // set up visualization markers
-  rviz_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("/global_robot_markers", rclcpp::QoS(1));
+  rviz_robotmarker_pub_ = create_publisher<visualization_msgs::msg::Marker>("/global_robot_markers", rclcpp::QoS(1));
+  rviz_obstmarker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/global_obst_markers", rclcpp::QoS(1).transient_local());
 
+  // set up extra pieces of simulation
+  simulation_setup();
 
   // set up a timer process
   topic_step_ = 1.0/topic_rate;
@@ -312,7 +319,7 @@ void FreyjaSimulator::simulation_setup()
   get_parameter( "team_color", marker_rgb );
   get_parameter( "team_id", team_id );
 
-  // set up visualisation markers
+  // set up visualisation markers for robots
   robot_markers_.color.a = 0.42;
   robot_markers_.color.r = marker_rgb[0];
   robot_markers_.color.g = marker_rgb[1];
@@ -324,6 +331,32 @@ void FreyjaSimulator::simulation_setup()
   robot_markers_.lifetime = rclcpp::Duration(std::chrono::seconds(2));
   
   robot_markers_.points.resize(num_robots_);
+
+  // set up visualization for obstacles
+  if( obst_pos_list_.size()%2 != 0 )
+    printf( "WARN: Obstacles list must be even sized: [x1 y1 x2 y2 ..]. Skipping!\n" );
+  else
+  {
+    std::cout << std::endl;
+    visualization_msgs::msg::Marker ob;
+    ob.color.a = 0.42;
+    ob.color.r = ob.color.g = ob.color.b = 0.8;
+    ob.scale.x = ob.scale.y = ob.scale.z = 0.5;
+    ob.header.frame_id = "map";
+    ob.header.stamp = now();
+    ob.type = visualization_msgs::msg::Marker::CYLINDER;
+    ob.id = 100;
+    for( unsigned int idx=0; idx<obst_pos_list_.size(); idx+=2 )
+    {
+      ob.pose.position.x = obst_pos_list_[idx];
+      ob.pose.position.y = obst_pos_list_[idx+1];
+      ob.pose.position.z = 0.25;
+      ob.pose.orientation.w = 1.0;
+      ob.id++;
+      obst_markers_.markers.push_back( ob );
+    }
+    rviz_obstmarker_pub_ -> publish( obst_markers_ );
+  }
 }
 
 bool FreyjaSimulator::collides( const GenericRobot& r1, const GenericRobot& r2 )
@@ -338,6 +371,7 @@ bool FreyjaSimulator::collides( const GenericRobot& r1, const GenericRobot& r2 )
 void FreyjaSimulator::timerTfCallback()
 {
   static rclcpp::Time t_topics_updated = now();
+  static rclcpp::Time t_onehertz_update = now();
   static TFStamped t;
   static Odom odom;
   static double x, y, th, vx, vy, w;
@@ -401,8 +435,15 @@ void FreyjaSimulator::timerTfCallback()
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );
     // publish markers
-    rviz_marker_pub_ -> publish( robot_markers_ );
+    rviz_robotmarker_pub_ -> publish( robot_markers_ );
     t_topics_updated = t_now;
+  }
+
+  // slow updates
+  if( (t_now - t_onehertz_update).seconds() > 1.0 )
+  {
+    rviz_obstmarker_pub_ -> publish( obst_markers_ );
+    t_onehertz_update = t_now;
   }
 }
 
