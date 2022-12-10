@@ -122,23 +122,24 @@ void GenericRobot::moveRobot( const double& dt )
   if( robot_type_ == 0 )
   {
     // diff-drive system using circle eqns.
-    new_theta = fast_approx::constrainAngleRad( theta_ + omega_body_*dt );
-    if( fast_approx::fastabs(omega_body_) < 0.005 )
+    omega_ = omega_body_;
+    new_theta = fast_approx::constrainAngleRad( theta_ + omega_*dt );
+    if( fast_approx::fastabs(omega_) < 0.005 )
     {
-      xvel_ = xvel_tgt_*dt*fast_approx::cosine( new_theta );
-      yvel_ = xvel_tgt_*dt*fast_approx::sine( new_theta );
+      xvel_ = xvel_tgt_*fast_approx::cosine( new_theta );
+      yvel_ = xvel_tgt_*fast_approx::sine( new_theta );
     }
     else
     {
-      double r = (xvel_tgt_/omega_body_);
-      xvel_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
-      yvel_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
+      double r = (xvel_tgt_/omega_);
+      xvel_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) )/dt;
+      yvel_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) )/dt;
     }
   }
   else if( robot_type_ == 1 )
   {
     // holonomic robot point
-    new_theta = fast_approx::constrainAngleRad( theta_ + omega_body_*dt );
+    new_theta = fast_approx::constrainAngleRad( theta_ + omega_*dt );
     double ax = std::min( MAX_LINEAR_ACC_, std::max(-MAX_LINEAR_ACC_, (xvel_tgt_ - xvel_)/dt) );
     double ay = std::min( MAX_LINEAR_ACC_, std::max(-MAX_LINEAR_ACC_, (yvel_tgt_ - yvel_)/dt) );
     xvel_ += ax * dt;
@@ -298,7 +299,6 @@ void FreyjaSimulator::create_robots( int robots_type )
                             {robots_[idx].setBodyVelocity(msg->linear.x, msg->linear.y, msg->angular.z);} );
     // create publisher
     odom_pubs_[idx] = create_publisher<Odom> ( rname + "/odometry", 1 );
-    std::cout << std::endl;
   }
   printf( "All robots created. Starting managers..\n" );
   for(int idx=0; idx<num_robots_; idx++ )
