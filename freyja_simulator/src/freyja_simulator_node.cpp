@@ -32,9 +32,9 @@ typedef nav_msgs::msg::Odometry   Odom;
 
 struct GenericRobot
 {
-  double x_, y_, theta_;
-  double vx_, vy_, omega_;
-  double bv_, bw_;
+  double xpos_, ypos_, theta_;
+  double xvel_, yvel_, omega_;
+  double xvel_tgt_, yvel_tgt_, omega_body_;
 
   int unique_id_;
   std::string name_;
@@ -46,6 +46,7 @@ struct GenericRobot
   // custom robot properties
   const double MAX_LINEAR_SPD_=2.0;
   const double MAX_ANGULAR_SPD_=2.0;
+  const double MAX_LINEAR_ACC_ = 1.0;
 
   public:
     GenericRobot( int, std::string, int );
@@ -55,8 +56,11 @@ struct GenericRobot
     // allow move
     GenericRobot( GenericRobot&& d): unique_id_(d.unique_id_), name_(std::move(d.name_)), robot_type_(d.robot_type_)
     {
-      x_ = d.x_; y_ = d.y_; theta_ = d.theta_;
-      vx_ = d.vx_; vy_ = d.vy_; omega_ = d.omega_;
+      xpos_ = d.xpos_; ypos_ = d.ypos_; theta_ = d.theta_;
+      xvel_ = d.xvel_; yvel_ = d.yvel_; omega_ = d.omega_;
+      xvel_tgt_ = d.xvel_tgt_;
+      yvel_tgt_ = d.yvel_tgt_;
+      omega_body_ = d.omega_body_;
     }
     GenericRobot& operator=( GenericRobot&& ) = default;
     // explicit destructor for handling shutdown
@@ -64,18 +68,16 @@ struct GenericRobot
 
     void initialise_stopped( const double& _x, const double& _y, const double& _th );
     void setVelocity( const double& _vx, const double& _vy, const double& _w );
-    void setBodyVelocity( const double _v, const double _w );
+    void setBodyVelocity( const double&, const double&, const double& );
     void getWorldVelocity( double& _vx, double& _vy, double& _w) const
-      { _vx = vx_; _vy = vy_; _w = omega_; }
+      { _vx = xvel_; _vy = yvel_; _w = omega_; }
     void getWorldPosition( double& _px, double& _py, double& _th ) const
-      { _px = x_; _py = y_; _th = theta_; }
+      { _px = xpos_; _py = ypos_; _th = theta_; }
     
     void alert_problem() { is_ok_ = false; }
     void terminate() { keep_alive_.clear(std::memory_order_release); }
     
-    std::function<void(const double&)> moveRobotDyn;
-    void moveRobotDiffDrive( const double& dt );
-    void moveRobotHolonomic( const double& dt );
+    void moveRobot( const double& dt );
     void manager_process();
 
 };
@@ -90,70 +92,60 @@ GenericRobot::GenericRobot( int _uid, std::string _n, int _type ) :
                                     name_(std::move(_n)),
                                     robot_type_(_type)
 {
-  x_ = y_ = theta_ = std::nan("");
-  vx_ = vy_ = omega_ = std::nan("");
+  xpos_ = ypos_ = theta_ = std::nan("");
+  xvel_ = yvel_ = omega_ = std::nan("");
   is_ok_ = false;
-  // associate dynamics model function
-  if( robot_type_ == 0 )
-    moveRobotDyn = std::bind( &GenericRobot::moveRobotDiffDrive, this, std::placeholders::_1 );
-  else
-    moveRobotDyn = std::bind( &GenericRobot::moveRobotHolonomic, this, std::placeholders::_1 );
 }
 void GenericRobot::initialise_stopped( const double& _x, const double& _y, const double& _th )
 {
-  x_ = _x;
-  y_ = _y;
+  xpos_ = _x;
+  ypos_ = _y;
   theta_ = _th;
-  vx_ = vy_ = omega_ = 0.0;
+  xvel_ = yvel_ = omega_ = 0.0;
+  xvel_tgt_ = yvel_tgt_ = omega_body_ = 0.0;
   
   is_ok_ = true;
   keep_alive_.test_and_set();
-  printf( "Robot instance: %s, pos: [%0.3f, %0.3f, %0.3f], vel: [%0.2f, %0.2f, %0.2f]\n",
-              name_.c_str(), x_, y_, theta_, vx_, vy_, omega_ );
+  printf( "Robot instance: %s(%d), pos: [%0.3f, %0.3f, %0.3f], vel: [%0.2f, %0.2f, %0.2f]\n",
+              name_.c_str(), unique_id_, xpos_, ypos_, theta_, xvel_, yvel_, omega_ );
 }
 
-void GenericRobot::setBodyVelocity( const double body_vx, const double body_w )
+void GenericRobot::setBodyVelocity( const double& body_vx, const double& body_vy, const double& body_w )
 {
-  bv_ = std::min( MAX_LINEAR_SPD_, std::max(-MAX_LINEAR_SPD_, body_vx) );
-  bw_ = std::min( MAX_ANGULAR_SPD_, std::max(-MAX_ANGULAR_SPD_, body_w) );
+  xvel_tgt_ = std::min( MAX_LINEAR_SPD_, std::max(-MAX_LINEAR_SPD_, body_vx) );
+  yvel_tgt_ = std::min( MAX_LINEAR_SPD_, std::max(-MAX_LINEAR_SPD_, body_vy) );
+  omega_body_ = std::min( MAX_ANGULAR_SPD_, std::max(-MAX_ANGULAR_SPD_, body_w) );
 }
-void GenericRobot::moveRobotDiffDrive( const double& dt )
+void GenericRobot::moveRobot( const double& dt )
 {
-  double new_theta = fast_approx::constrainAngleRad( theta_ + bw_*dt );
-  if( fast_approx::fastabs(bw_) < 0.005 )
+  double new_theta = 0.0;
+  if( robot_type_ == 0 )
   {
-    vx_ = bv_*dt*fast_approx::cosine( new_theta );
-    vy_ = bv_*dt*fast_approx::sine( new_theta );
+    // diff-drive system using circle eqns.
+    new_theta = fast_approx::constrainAngleRad( theta_ + omega_body_*dt );
+    if( fast_approx::fastabs(omega_body_) < 0.005 )
+    {
+      xvel_ = xvel_tgt_*dt*fast_approx::cosine( new_theta );
+      yvel_ = xvel_tgt_*dt*fast_approx::sine( new_theta );
+    }
+    else
+    {
+      double r = (xvel_tgt_/omega_body_);
+      xvel_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
+      yvel_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
+    }
   }
-  else
+  else if( robot_type_ == 1 )
   {
-    double r = (bv_/bw_);
-    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
-    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
+    // holonomic robot point
+    new_theta = fast_approx::constrainAngleRad( theta_ + omega_body_*dt );
+    double ax = std::min( MAX_LINEAR_ACC_, std::max(-MAX_LINEAR_ACC_, (xvel_tgt_ - xvel_)/dt) );
+    double ay = std::min( MAX_LINEAR_ACC_, std::max(-MAX_LINEAR_ACC_, (yvel_tgt_ - yvel_)/dt) );
+    xvel_ += ax * dt;
+    yvel_ += ay * dt;
   }
-  
-  x_ += vx_;
-  y_ += vy_;
-  theta_ = new_theta; 
-}
-
-void GenericRobot::moveRobotHolonomic( const double& dt )
-{
-  double new_theta = fast_approx::constrainAngleRad( theta_ + bw_*dt );
-  if( std::fabs(bw_) < 0.005 )
-  {
-    vx_ = bv_*dt*fast_approx::cosine( new_theta );
-    vy_ = bv_*dt*fast_approx::sine( new_theta );
-  }
-  else
-  {
-    double r = (bv_/bw_);
-    vx_ = -r*( fast_approx::sine(theta_) - fast_approx::sine(new_theta) );
-    vy_ = r * ( fast_approx::cosine(theta_) - fast_approx::cosine(new_theta) );
-  }
-  
-  x_ += vx_;
-  y_ += vy_;
+  xpos_ += xvel_*dt;
+  ypos_ += yvel_*dt;
   theta_ = new_theta; 
 }
 
@@ -168,12 +160,12 @@ void GenericRobot::manager_process()
   {
     if( is_ok_ )
     {
-      moveRobotDyn(dt);
+      moveRobot(dt);
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }
     else
     {
-      setBodyVelocity( 0.0, 0.0 );
+      setBodyVelocity( 0.0, 0.0, 0.0 );
       std::this_thread::sleep_for( std::chrono::milliseconds(2*dt_ms) );
       is_ok_ = true;
     }
@@ -235,7 +227,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
   declare_parameter<int>( "team_id", 0 );
   declare_parameter<bool>( "enable_collisions", false );
-  declare_parameter<std::string>( "robot_type", "diffdrive" );
+  declare_parameter<std::string>( "robots_type", "diffdrive" );
   
   double refresh_rate, topic_rate;
   std::string robot_type_str;
@@ -279,7 +271,6 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   tf_timer_ = rclcpp::create_timer( this, get_clock(), std::chrono::duration<double>(sim_step_),
                                     std::bind(&FreyjaSimulator::timerTfCallback, this) );
   RCLCPP_INFO( get_logger(), "Simulator Ready!" );
-  std::cout << std::endl;
 }
 
 void FreyjaSimulator::create_robots( int robots_type )
@@ -304,9 +295,10 @@ void FreyjaSimulator::create_robots( int robots_type )
     // create subscriber
     cmd_subs_[idx] = create_subscription<BodyTwist> ( rname + "/cmd_vel", 1,
                             [this,idx](const BodyTwist::ConstSharedPtr msg)
-                            {robots_[idx].setBodyVelocity(msg->linear.x, msg->angular.z);} );
+                            {robots_[idx].setBodyVelocity(msg->linear.x, msg->linear.y, msg->angular.z);} );
     // create publisher
     odom_pubs_[idx] = create_publisher<Odom> ( rname + "/odometry", 1 );
+    std::cout << std::endl;
   }
   printf( "All robots created. Starting managers..\n" );
   for(int idx=0; idx<num_robots_; idx++ )
