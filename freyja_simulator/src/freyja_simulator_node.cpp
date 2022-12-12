@@ -20,16 +20,21 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include "tf2_ros/transform_broadcaster.h"
 
+#include "freyja_msgs/msg/current_state.hpp"
+#include "freyja_msgs/msg/reference_state.hpp"
+#include "freyja_msgs/msg/controller_debug.hpp"
+
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "fast_approximate_math.hpp"
 
 #include "generic_robot.hpp"
+#include "generic_flyers.hpp"
 
-typedef geometry_msgs::msg::TransformStamped TFStamped;
-typedef geometry_msgs::msg::Twist BodyTwist;
-typedef nav_msgs::msg::Odometry   Odom;
-
+typedef geometry_msgs::msg::TransformStamped  TFStamped;
+typedef geometry_msgs::msg::Vector3           CmdVel3d;
+typedef freyja_msgs::msg::ReferenceState      RefState;
+typedef freyja_msgs::msg::ControllerDebug     CTRLDebug;
 
 
 /* Main simulation interface */
@@ -38,14 +43,14 @@ class FreyjaSimulator : public rclcpp::Node
 {
   int num_robots_;
   std::vector<long int> robot_num_range_;
-  std::vector<double> spawn_limits_xy_;
+  std::vector<double> init_positions_;
   
   double sim_step_;
   double topic_step_;
 
 
   // robots and managers
-  std::vector<GenericRobot> robots_;
+  std::vector<GenericFlyer> robots_;
   std::vector<std::thread> robot_mgrs_;
   bool enable_collisions_;
   visualization_msgs::msg::Marker robot_markers_;
@@ -55,8 +60,8 @@ class FreyjaSimulator : public rclcpp::Node
   visualization_msgs::msg::MarkerArray obst_markers_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  std::vector<rclcpp::Subscription<BodyTwist>::SharedPtr> cmd_subs_;
-  std::vector<rclcpp::Publisher<Odom>::SharedPtr> odom_pubs_;
+  std::vector<rclcpp::Subscription<CTRLDebug>::SharedPtr> ctrl_subs_;
+
   std::vector<TFStamped> all_tforms_;
   
   public:
@@ -71,7 +76,7 @@ class FreyjaSimulator : public rclcpp::Node
     
     void create_robots( int );
     void proper_shutdown();
-    bool collides( const GenericRobot&, const GenericRobot& );
+    bool collides( const GenericFlyer&, const GenericFlyer& );
 
 };
 
@@ -82,7 +87,7 @@ FreyjaSimulator::~FreyjaSimulator()
 FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 {
   declare_parameter<std::vector<long int>>( "robot_num_range", std::vector<long int>({3, 7}) );
-  declare_parameter<std::vector<double>>( "spawn_limits_xy", std::vector<double>({-2.0, 2.0}) );
+  declare_parameter<std::vector<double>>( "init_positions", std::vector<double>({-2.0, 2.0, -3.0}) );
   declare_parameter<double>("sim_rate", 50.0);
   declare_parameter<double>("topic_rate", 30.0);
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
@@ -93,30 +98,25 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   
   double refresh_rate, topic_rate;
   std::string robot_type_str;
-  int robots_type = 0;
   get_parameter( "robot_num_range", robot_num_range_ );
-  get_parameter( "spawn_limits_xy", spawn_limits_xy_ );
+  get_parameter( "init_positions", init_positions_ );
   get_parameter( "sim_rate", refresh_rate );
   get_parameter( "topic_rate", topic_rate );
   get_parameter( "enable_collisions", enable_collisions_ );
-  get_parameter( "robots_type", robot_type_str );
   get_parameter( "obst_pos_list", obst_pos_list_ );
 
   // pre-setup
   num_robots_ = int( robot_num_range_[1] - robot_num_range_[0] + 1 );
   printf( "Number of robots: %d\n", num_robots_ );
   assert( num_robots_ > 0 );
-  cmd_subs_.resize(num_robots_);
-  all_tforms_.resize(num_robots_);
-  odom_pubs_.resize(num_robots_);
+  assert( init_positions_.size()%3 == 0 );
 
-  if( robot_type_str == "diffdrive" )
-    robots_type = 0;
-  else if( robot_type_str == "holonomic" )
-    robots_type = 1;
+  ctrl_subs_.resize(num_robots_);
+  all_tforms_.resize(num_robots_);
+
 
   // instantiate all robots
-  create_robots( robots_type );
+  create_robots( 0 );
 
   // set up broadcaster
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -139,31 +139,35 @@ void FreyjaSimulator::create_robots( int robots_type )
 {
   std::random_device rd;
   std::default_random_engine rand_engine(rd());
-  std::uniform_real_distribution<> xpos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
-  std::uniform_real_distribution<> ypos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
-  std::uniform_real_distribution<> theta_dist(-3.14, 3.14);
+  //std::uniform_real_distribution<> xpos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
+  //std::uniform_real_distribution<> ypos_distrib(spawn_limits_xy_[0], spawn_limits_xy_[1]);
+  //std::uniform_real_distribution<> theta_dist(-3.14, 3.14);
   std::uniform_int_distribution<> uid_dist(200,300);
 
   int idx = 0;
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
-  {
-    double x = xpos_distrib(rand_engine);
-    double y = ypos_distrib(rand_engine);
-    double th = theta_dist(rand_engine);
+  {    
     int uid = uid_dist(rand_engine);
-    std::string rname = "robot" + std::to_string(r);
-    robots_.emplace_back( uid, rname, robots_type );
-    robots_[idx].initialise_stopped( x, y, th );
+    std::string rname = "U" + std::to_string(r);
+    
+    robots_.emplace_back( uid, rname, 0.1 );
+          std::cout << std::endl;
+  std::this_thread::sleep_for( std::chrono::seconds(1) );
+    Eigen::Vector3d p = { init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2] };
+
+    robots_[idx].initialise_stopped( p );
     // create subscriber
-    cmd_subs_[idx] = create_subscription<BodyTwist> ( rname + "/cmd_vel", 1,
-                            [this,idx](const BodyTwist::ConstSharedPtr msg)
-                            {robots_[idx].setBodyVelocity(msg->linear.x, msg->linear.y, msg->angular.z);} );
-    // create publisher
-    odom_pubs_[idx] = create_publisher<Odom> ( rname + "/odometry", 1 );
+    ctrl_subs_[idx] = create_subscription<CTRLDebug> ( rname + "/controller_debug", 1,
+                            [this,idx](const CTRLDebug::ConstSharedPtr msg)
+                            {
+                              Eigen::Map<const Eigen::Vector4f> u( msg->lqr_u.data() );
+                              robots_[idx].setCtrlInput( u.cast<double>() );
+                            } );
   }
   printf( "All robots created. Starting managers..\n" );
+
   for(int idx=0; idx<num_robots_; idx++ )
-    robot_mgrs_.push_back( std::move(std::thread(&GenericRobot::manager_process, &robots_[idx])) );
+    robot_mgrs_.push_back( std::move(std::thread(&GenericFlyer::manager_process, &robots_[idx])) );
 }
 
 void FreyjaSimulator::simulation_setup()
@@ -213,13 +217,12 @@ void FreyjaSimulator::simulation_setup()
   }
 }
 
-bool FreyjaSimulator::collides( const GenericRobot& r1, const GenericRobot& r2 )
+bool FreyjaSimulator::collides( const GenericFlyer& r1, const GenericFlyer& r2 )
 {
-  static double r1x, r1y, r2x, r2y;
-  static double th;
-  r1.getWorldPosition( r1x, r1y, th );
-  r2.getWorldPosition( r2x, r2y, th );
-  return ( (r1x-r2x)*(r1x-r2x) + (r1y-r2y)*(r1y-r2y) < 0.25*0.25 );
+  static Eigen::Vector3d r1pos, r2pos;
+  r1.getWorldPosition( r1pos );
+  r2.getWorldPosition( r2pos );
+  return ( (r1pos-r2pos).squaredNorm() < 0.25*0.25 );
 }
 
 void FreyjaSimulator::timerTfCallback()
@@ -227,8 +230,8 @@ void FreyjaSimulator::timerTfCallback()
   static rclcpp::Time t_topics_updated = now();
   static rclcpp::Time t_onehertz_update = now();
   static TFStamped t;
-  static Odom odom;
-  static double x, y, th, vx, vy, w;
+  static Eigen::Vector3d robot_pos;
+  //static Odom odom;
 
   // make sure everyone is doing ok
   if( enable_collisions_ )
@@ -254,14 +257,14 @@ void FreyjaSimulator::timerTfCallback()
     t.header.frame_id = "map";
     for( int idx=0; idx < num_robots_; idx++ )
     {
-      robots_[idx].getWorldPosition(x, y, th);
-      robots_[idx].getWorldVelocity(vx, vy, w);
+      robots_[idx].getWorldPosition(robot_pos);
+      //robots_[idx].getWorldVelocity(vx, vy, w);
       // fill for tf
-      t.transform.translation.x = x;
-      t.transform.translation.y = y;
-      t.transform.translation.z = 0.0;
+      t.transform.translation.x = robot_pos.coeff(0);
+      t.transform.translation.y = robot_pos.coeff(1);
+      t.transform.translation.z = robot_pos.coeff(2);
       tf2::Quaternion q;
-      q.setRPY(0, 0, th);
+      q.setRPY(0, 0, 0);
       t.transform.rotation.x = q.x();
       t.transform.rotation.y = q.y();
       t.transform.rotation.z = q.z();
@@ -272,24 +275,24 @@ void FreyjaSimulator::timerTfCallback()
       all_tforms_[idx] = t;
 
       // fill for visualisation
-      robot_markers_.points[idx].x = x;
-      robot_markers_.points[idx].y = y;
-      robot_markers_.points[idx].z = 0.0;
+      //robot_markers_.points[idx].x = x;
+      //robot_markers_.points[idx].y = y;
+      //robot_markers_.points[idx].z = 0.0;
 
       // fill for odom
-      odom.pose.pose.position.x = x;
-      odom.pose.pose.position.y = y;
-      odom.pose.pose.orientation = tf2::toMsg(q);
-      odom.twist.twist.linear.x = vx;
-      odom.twist.twist.linear.y = vy;
-      odom.twist.twist.angular.z = w;
-      odom.child_frame_id = robots_[idx].name_;
-      odom_pubs_[idx] -> publish( odom );
+      // odom.pose.pose.position.x = x;
+      // odom.pose.pose.position.y = y;
+      // odom.pose.pose.orientation = tf2::toMsg(q);
+      // odom.twist.twist.linear.x = vx;
+      // odom.twist.twist.linear.y = vy;
+      // odom.twist.twist.angular.z = w;
+      // odom.child_frame_id = robots_[idx].name_;
+      // odom_pubs_[idx] -> publish( odom );
     }
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );
     // publish markers
-    rviz_robotmarker_pub_ -> publish( robot_markers_ );
+    //rviz_robotmarker_pub_ -> publish( robot_markers_ );
     t_topics_updated = t_now;
   }
 

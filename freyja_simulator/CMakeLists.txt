@@ -18,6 +18,7 @@ find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(freyja_msgs REQUIRED)
 
 add_executable(freyja_simulator_node src/freyja_simulator_node.cpp)
 target_include_directories(freyja_simulator_node PUBLIC
@@ -35,6 +36,7 @@ ament_target_dependencies(
   "std_msgs"
   "sensor_msgs"
   "visualization_msgs"
+  freyja_msgs
 )
 
 install(TARGETS freyja_simulator_node

@@ -1,6 +1,7 @@
 namespace fast_approx
 {
   constexpr double pii = 3.14159;
+  constexpr double accg = 9.81;
   constexpr double fact3 = 3.0*2.0;
   constexpr double fact5 = 5.0*4.0*fact3;
   constexpr double fact7 = 7.0*6.0*fact5;
