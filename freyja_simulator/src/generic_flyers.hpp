@@ -7,10 +7,10 @@ typedef Eigen::Matrix<double, 9, 1> Vector9d;
 struct GenericFlyer
 {
   Vector9d posvelacc_;
-  Vector6d ang_angrate_;
+  Vector6d rpy_rpyrate_;
   
   Eigen::Vector3d cur_extforces_;
-  Eigen::Vector3d cur_ctrlinput_;
+  Eigen::Vector4d cur_ctrlinput_;
 
   double total_mass_;
 
@@ -43,7 +43,7 @@ struct GenericFlyer
 
     {
       posvelacc_ = d.posvelacc_;
-      ang_angrate_ = d.ang_angrate_;
+      rpy_rpyrate_ = d.rpy_rpyrate_;
       cur_extforces_ = d.cur_extforces_;
       cur_ctrlinput_ = d.cur_ctrlinput_;
       sys_A_ = d.sys_A_;
@@ -58,16 +58,18 @@ struct GenericFlyer
 
     void initialise_stopped( Eigen::VectorXd _pos );
     void setVelocity( Eigen::Vector3d _tgt_vel ) { posvelacc_.segment<3>(3).setZero(); }
-    void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl.head<3>(); }
+    void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl; }
     void setExtForces( Eigen::Vector3d _extf ) { cur_extforces_ = _extf; }
     void arrestMotion() { posvelacc_.tail<6>().setZero(); }
-    void arrestMotionGround() { posvelacc_(2) = posvelacc_(5) = 0.0; }
+    void arrestMotionGround() { posvelacc_(2) = 0.0; }
     bool onGround() { return posvelacc_.coeff(2) > -0.01; }
     
     void getWorldVelocity( Eigen::Vector3d &_v ) const
       { _v = posvelacc_.segment<3>(3); }
     void getWorldPosition( Eigen::Vector3d &_p ) const
       { _p = posvelacc_.segment<3>(0); }
+    void getAnglesRPY( Eigen::Vector3d &_a ) const
+      { _a = rpy_rpyrate_.segment<3>(0); }
     
     void alert_problem() { is_ok_ = false; }
     void terminate() { keep_alive_.clear(std::memory_order_release); }
@@ -88,7 +90,7 @@ GenericFlyer::GenericFlyer( int _uid, std::string _n, double dt ) :
                                     step_dt_(dt)
 {
   posvelacc_.setZero();
-  ang_angrate_.setZero();
+  rpy_rpyrate_.setZero();
   cur_extforces_.setZero();
   cur_ctrlinput_.setZero();
   initialise_system();
@@ -118,7 +120,7 @@ void GenericFlyer::initialise_system()
             0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt,
-            Eigen::MatrixXd::Zero(3,6), Eigen::MatrixXd::Identity(3,3);
+            Eigen::MatrixXd::Zero(3,6), Eigen::MatrixXd::Zero(3,3);
   sys_B_ << Eigen::MatrixXd::Zero(6,3),
             Eigen::MatrixXd::Identity(3,3);
   sys_Bext_ << sys_B_;
@@ -128,13 +130,18 @@ void GenericFlyer::moveRobot( const double& dt )
 {
   // called by manager process, with dt as the step time
   static Eigen::Vector3d gvec = {0.0, 0.0, fast_approx::accg};
-  posvelacc_ = sys_A_ * posvelacc_ ;
-  posvelacc_.tail<3>() = cur_ctrlinput_ + cur_extforces_ + gvec;
-              //+ sys_B_ * cur_ctrlinput_
-              //+ sys_Bext_ * cur_extforces_
-              //+ sys_Bext_ * gvec;
-  //printf( "current z posvel: %0.2f, %0.2f\n", posvelacc_(2), posvelacc_(5) );
-  // std::cout.width(10); std::cout << posvelacc_.transpose() << std::endl;
+  posvelacc_ = sys_A_ * posvelacc_ 
+              + sys_B_ * cur_ctrlinput_.head<3>()
+              + sys_Bext_ * cur_extforces_
+              + sys_Bext_ * gvec;
+  /*  if A.bottomRightCorner<3,3> is identity, B matrix can be
+  *   removed and use this step separately:
+  *     posvelacc_.tail<3>() = cur_ctrlinput_.head<3>() + cur_extforces_ + gvec;
+  */
+  
+  // update angles naively using ang-rate, and overwrite yaw-rate from ctrl
+  rpy_rpyrate_ = sys_A_.topLeftCorner<6,6>() * rpy_rpyrate_;
+  rpy_rpyrate_.tail<1>() = cur_ctrlinput_.tail<1>(); 
 }
 
 void GenericFlyer::manager_process()
@@ -148,10 +155,10 @@ void GenericFlyer::manager_process()
   {
     if( is_ok_ )
     {
+      if( onGround() )
+        arrestMotionGround();
       moveRobot(dt);
-      //if( onGround() )
-      //  arrestMotionGround();
-      
+
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }
     else

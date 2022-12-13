@@ -150,7 +150,7 @@ void FreyjaSimulator::create_robots( int robots_type )
     int uid = uid_dist(rand_engine);
     std::string rname = "U" + std::to_string(r);
     
-    robots_.emplace_back( uid, rname, 0.1 );
+    robots_.emplace_back( uid, rname, 0.01 );
           std::cout << std::endl;
   std::this_thread::sleep_for( std::chrono::seconds(1) );
     Eigen::Vector3d p = { init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2] };
@@ -230,7 +230,7 @@ void FreyjaSimulator::timerTfCallback()
   static rclcpp::Time t_topics_updated = now();
   static rclcpp::Time t_onehertz_update = now();
   static TFStamped t;
-  static Eigen::Vector3d robot_pos;
+  static Eigen::Vector3d robot_pos, robot_rpy;
   //static Odom odom;
 
   // make sure everyone is doing ok
@@ -254,17 +254,17 @@ void FreyjaSimulator::timerTfCallback()
   if( (t_now - t_topics_updated).seconds() > topic_step_ )
   {
     // get everyone's poses
-    t.header.frame_id = "map";
+    t.header.frame_id = "map_ned";
     for( int idx=0; idx < num_robots_; idx++ )
     {
       robots_[idx].getWorldPosition(robot_pos);
-      //robots_[idx].getWorldVelocity(vx, vy, w);
+      robots_[idx].getAnglesRPY(robot_rpy);
       // fill for tf
       t.transform.translation.x = robot_pos.coeff(0);
       t.transform.translation.y = robot_pos.coeff(1);
       t.transform.translation.z = robot_pos.coeff(2);
       tf2::Quaternion q;
-      q.setRPY(0, 0, 0);
+      q.setRPY(robot_rpy.coeff(0), robot_rpy.coeff(1), robot_rpy.coeff(2));
       t.transform.rotation.x = q.x();
       t.transform.rotation.y = q.y();
       t.transform.rotation.z = q.z();
@@ -279,15 +279,6 @@ void FreyjaSimulator::timerTfCallback()
       //robot_markers_.points[idx].y = y;
       //robot_markers_.points[idx].z = 0.0;
 
-      // fill for odom
-      // odom.pose.pose.position.x = x;
-      // odom.pose.pose.position.y = y;
-      // odom.pose.pose.orientation = tf2::toMsg(q);
-      // odom.twist.twist.linear.x = vx;
-      // odom.twist.twist.linear.y = vy;
-      // odom.twist.twist.angular.z = w;
-      // odom.child_frame_id = robots_[idx].name_;
-      // odom_pubs_[idx] -> publish( odom );
     }
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );
