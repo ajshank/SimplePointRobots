@@ -5,6 +5,7 @@ namespace fast_approx
   constexpr double fact3 = 3.0*2.0;
   constexpr double fact5 = 5.0*4.0*fact3;
   constexpr double fact7 = 7.0*6.0*fact5;
+  constexpr inline double square(const double &x) { return x*x; }
   constexpr inline double cube(const double &x) { return x*x*x; }
   // fast sign function, returns {+1 or -1}
   #define posneg(x) ((x>0)*2.0-1)

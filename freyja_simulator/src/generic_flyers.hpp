@@ -57,7 +57,7 @@ struct GenericFlyer
     void initialise_system();
 
     void initialise_stopped( Eigen::VectorXd _pos );
-    void setVelocity( Eigen::Vector3d _tgt_vel ) { posvelacc_.segment<3>(3).setZero(); }
+    void setVelocity( Eigen::Vector3d _tgt_vel ) { posvelacc_.segment<3>(3) = _tgt_vel; }
     void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl; }
     void setExtForces( Eigen::Vector3d _extf ) { cur_extforces_ = _extf; }
     void arrestMotion() { posvelacc_.tail<6>().setZero(); }
