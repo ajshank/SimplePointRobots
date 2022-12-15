@@ -13,6 +13,7 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "geometry_msgs/msg/vector3.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -32,9 +33,11 @@
 #include "generic_flyers.hpp"
 
 typedef geometry_msgs::msg::TransformStamped  TFStamped;
-typedef geometry_msgs::msg::Vector3           CmdVel3d;
+typedef geometry_msgs::msg::Vector3           GeomVec3d;
 typedef freyja_msgs::msg::ReferenceState      RefState;
 typedef freyja_msgs::msg::ControllerDebug     CTRLDebug;
+typedef visualization_msgs::msg::MarkerArray  RvizMarkerArray;
+typedef geometry_msgs::msg::Vector3Stamped    GeomVec3Stamped;
 
 
 /* Main simulation interface */
@@ -63,6 +66,7 @@ class FreyjaSimulator : public rclcpp::Node
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::vector<rclcpp::Subscription<CTRLDebug>::SharedPtr> ctrl_subs_;
+  std::vector<rclcpp::Publisher<GeomVec3Stamped>::SharedPtr> extf_pubs_;
 
   std::vector<TFStamped> all_tforms_;
   
@@ -118,6 +122,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 
   ctrl_subs_.resize(num_robots_);
   all_tforms_.resize(num_robots_);
+  extf_pubs_.resize(num_robots_);
 
 
   // instantiate all robots
@@ -126,8 +131,8 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   // set up broadcaster
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   // set up visualization markers
-  rviz_robotmarker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/global_robot_markers", rclcpp::QoS(1));
-  rviz_obstmarker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/global_obst_markers", rclcpp::QoS(1).transient_local());
+  rviz_robotmarker_pub_ = create_publisher<RvizMarkerArray>("/global_robot_markers", rclcpp::QoS(1));
+  rviz_obstmarker_pub_ = create_publisher<RvizMarkerArray>("/global_obst_markers", rclcpp::QoS(1).transient_local());
 
   // set up extra pieces of simulation
   rendering_setup();
@@ -163,6 +168,7 @@ void FreyjaSimulator::create_robots( int robots_type )
                               Eigen::Map<const Eigen::Vector4f> u( msg->lqr_u.data() );
                               robots_[idx].setCtrlInput( u.cast<double>() );
                             } );
+    extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
   }
   printf( "All robots created. Starting managers..\n" );
 
@@ -179,19 +185,6 @@ void FreyjaSimulator::rendering_setup()
   get_parameter( "team_color", marker_rgb );
   get_parameter( "team_id", team_id );
 
-  // set up visualisation markers for robots
-  /*
-  robot_markers_.color.a = 0.31;
-  robot_markers_.color.g = 0.71;
-  robot_markers_.scale.x = robot_markers_.scale.y = 0.3;
-  robot_markers_.scale.z = 3.5;
-  robot_markers_.header.frame_id = "map_ned";
-  robot_markers_.id = team_id;
-  robot_markers_.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-  robot_markers_.lifetime = rclcpp::Duration(std::chrono::seconds(2));
-  
-  robot_markers_.points.resize(num_robots_);
-  */
   float dw_length = 2.5;   // metres
   visualization_msgs::msg::Marker m;
   m.color.a = 0.31;
@@ -291,7 +284,7 @@ void FreyjaSimulator::timerTfCallback()
   static rclcpp::Time t_topics_updated = now();
   static rclcpp::Time t_onehertz_update = now();
   static TFStamped t;
-  static Eigen::Vector3d robot_pos, robot_rpy;
+  static Eigen::Vector3d robot_pos, robot_rpy, robot_extf;
   //static Odom odom;
 
   // make sure everyone is doing ok
@@ -332,6 +325,7 @@ void FreyjaSimulator::timerTfCallback()
     {
       robots_[idx].getWorldPosition(robot_pos);
       robots_[idx].getAnglesRPY(robot_rpy);
+      robots_[idx].getExtForces( robot_extf );
       // fill for tf
       t.transform.translation.x = robot_pos.coeff(0);
       t.transform.translation.y = robot_pos.coeff(1);
@@ -346,6 +340,13 @@ void FreyjaSimulator::timerTfCallback()
       t.header.stamp = t_now;
       t.child_frame_id = robots_[idx].name_;
       all_tforms_[idx] = t;
+
+      // publish forces
+      GeomVec3Stamped ext_f_msg;
+      ext_f_msg.vector.x = robot_extf.coeff(0);
+      ext_f_msg.vector.y = robot_extf.coeff(1);
+      ext_f_msg.vector.z = robot_extf.coeff(2);
+      extf_pubs_[idx] -> publish( ext_f_msg );
     }
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );

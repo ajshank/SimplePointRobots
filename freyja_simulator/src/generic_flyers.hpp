@@ -70,6 +70,8 @@ struct GenericFlyer
       { _p = posvelacc_.segment<3>(0); }
     void getAnglesRPY( Eigen::Vector3d &_a ) const
       { _a = rpy_rpyrate_.segment<3>(0); }
+    void getExtForces( Eigen::Vector3d &_f ) const
+      { _f = cur_extforces_; }
     
     void alert_problem() { is_ok_ = false; }
     void terminate() { keep_alive_.clear(std::memory_order_release); }
