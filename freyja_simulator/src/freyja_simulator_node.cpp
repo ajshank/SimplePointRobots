@@ -240,7 +240,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
 {
   // returns force applied on r1 due to r2's downwash
   static Eigen::Vector3d ext_f;
-  static Eigen::Vector3d r1pos, r2pos;
+  static Eigen::Vector3d r1pos, r2pos, r1vel, r2vel;
   static std::function<double(Eigen::Vector3d&)> r2ellipse;
   static double dw_halflen = 2.5/2;
   
@@ -250,7 +250,9 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
   {  
     // calc distance vector to r1 from r2
     r1.getWorldPosition( r1pos );
+    r1.getWorldVelocity( r1vel );
     r2.getWorldPosition( r2pos );
+    r2.getWorldVelocity( r2vel );
     // find r2's ellipse
     double a = 0.7;
     double c = dw_halflen;
@@ -269,9 +271,11 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
     if( insideEllipse )
     {
       Eigen::Vector3d r21 = r2pos-r1pos;
+      Eigen::Vector3d v21 = r2vel-r1vel;
       double mag_r21 = r21.norm();
-      // apply negated exponential curve
-      ext_f = -10*(r21/mag_r21)*std::exp(-mag_r21);
+      double mag_v21 = std::min( 4.0, std::max( 0.05, v21.norm() ) );
+      // apply negated exponential curve (pos) and inv-linear curve (vel)
+      ext_f = -8.0*std::exp(-mag_r21)*(r21/mag_r21).array() - 0.08/mag_v21;
     }
   }
 
@@ -282,8 +286,9 @@ void FreyjaSimulator::timerTfCallback()
 {
   static rclcpp::Time t_topics_updated = now();
   static rclcpp::Time t_onehertz_update = now();
-  static TFStamped t;
   static Eigen::Vector3d robot_pos, robot_rpy, robot_extf;
+  static TFStamped t;
+  static GeomVec3Stamped ext_f_msg;
   //static Odom odom;
 
   // make sure everyone is doing ok
@@ -341,7 +346,7 @@ void FreyjaSimulator::timerTfCallback()
       all_tforms_[idx] = t;
 
       // publish forces
-      GeomVec3Stamped ext_f_msg;
+      ext_f_msg.header.stamp = t_now;
       ext_f_msg.vector.x = robot_extf.coeff(0);
       ext_f_msg.vector.y = robot_extf.coeff(1);
       ext_f_msg.vector.z = robot_extf.coeff(2);
