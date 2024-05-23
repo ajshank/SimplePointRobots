@@ -31,10 +31,12 @@
 #include "generic_robot.hpp"
 #include "generic_flyers.hpp"
 
+typedef Eigen::Matrix<double, 9, 1>           Vector9d;
 typedef geometry_msgs::msg::TransformStamped  TFStamped;
 typedef geometry_msgs::msg::Vector3           GeomVec3d;
 typedef freyja_msgs::msg::ReferenceState      RefState;
 typedef freyja_msgs::msg::ControllerDebug     CTRLDebug;
+typedef freyja_msgs::msg::CurrentState        CurrentState;
 typedef visualization_msgs::msg::MarkerArray  RvizMarkerArray;
 typedef geometry_msgs::msg::Vector3Stamped    GeomVec3Stamped;
 
@@ -66,6 +68,7 @@ class FreyjaSimulator : public rclcpp::Node
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::vector<rclcpp::Subscription<CTRLDebug>::SharedPtr> ctrl_subs_;
   std::vector<rclcpp::Publisher<GeomVec3Stamped>::SharedPtr> extf_pubs_;
+  std::vector<rclcpp::Publisher<CurrentState>::SharedPtr> simstate_pubs_;
 
   std::vector<TFStamped> all_tforms_;
   
@@ -73,7 +76,7 @@ class FreyjaSimulator : public rclcpp::Node
     FreyjaSimulator();
     ~FreyjaSimulator();
     rclcpp::TimerBase::SharedPtr tf_timer_;
-    void timerTfCallback() __attribute__((hot));
+    void simMainLoopTimer() __attribute__((hot));
 
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr rviz_robotmarker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr rviz_obstmarker_pub_;
@@ -122,6 +125,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   ctrl_subs_.resize(num_robots_);
   all_tforms_.resize(num_robots_);
   extf_pubs_.resize(num_robots_);
+  simstate_pubs_.resize(num_robots_);
 
 
   // instantiate all robots
@@ -140,7 +144,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   topic_step_ = 1.0/topic_rate;
   sim_step_ = 1.0/refresh_rate;
   tf_timer_ = rclcpp::create_timer( this, get_clock(), std::chrono::duration<double>(sim_step_),
-                                    std::bind(&FreyjaSimulator::timerTfCallback, this) );
+                                    std::bind(&FreyjaSimulator::simMainLoopTimer, this) );
   RCLCPP_INFO( get_logger(), "Simulator Ready!" );
 }
 
@@ -149,6 +153,7 @@ void FreyjaSimulator::create_robots( int robots_type )
   std::random_device rd;
   std::default_random_engine rand_engine(rd());
   std::uniform_int_distribution<> uid_dist(200,300);
+  std::uniform_real_distribution<> position_dist(-1.0, 1.0);
   int uid_base = uid_dist(rand_engine);
   int idx = 0;
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
@@ -156,10 +161,14 @@ void FreyjaSimulator::create_robots( int robots_type )
     int uid = uid_base + r;
     std::string rname = "U" + std::to_string(r);
     
-    robots_.emplace_back( uid, rname, 0.01 );
-    Eigen::Vector3d p = { init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2] };
+    robots_.emplace_back( uid, rname, 0.005 );
+    Eigen::Vector3d pos;
+    if( idx < init_positions_.size() )
+      pos << init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2];
+    else
+      pos = Eigen::Vector3d::Random() + Eigen::Vector3d(0, 0, -10.0);
 
-    robots_[idx].initialise_stopped( p );
+    robots_[idx].initialise_stopped( pos );
     // create subscriber
     ctrl_subs_[idx] = create_subscription<CTRLDebug> ( rname + "/controller_debug", 1,
                             [this,idx](const CTRLDebug::ConstSharedPtr msg)
@@ -168,13 +177,14 @@ void FreyjaSimulator::create_robots( int robots_type )
                               robots_[idx].setCtrlInput( u.cast<double>() );
                             } );
     extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
+    simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
   }
   printf( "All robots created. Starting managers..\n" );
 
   for(int idx=0; idx<num_robots_; idx++ )
     robot_mgrs_.push_back( std::move(std::thread(&GenericFlyer::manager_process, &robots_[idx])) );
   // fake sleep to mimic simulator slow-startup
-  std::this_thread::sleep_for( std::chrono::seconds(1) );
+  //std::this_thread::sleep_for( std::chrono::seconds(1) );
 }
 
 void FreyjaSimulator::rendering_setup()
@@ -184,23 +194,25 @@ void FreyjaSimulator::rendering_setup()
   get_parameter( "team_color", marker_rgb );
   get_parameter( "team_id", team_id );
 
-  float dw_length = 2.5;   // metres
-  visualization_msgs::msg::Marker m;
-  m.color.a = 0.31;
-  m.color.g = 0.71;
-  m.type = visualization_msgs::msg::Marker::SPHERE;
-  m.lifetime = rclcpp::Duration(std::chrono::seconds(2));
-  m.pose.position.x = m.pose.position.y = 0.0;
-  m.pose.position.z = dw_length/2.0;
-  m.scale.x = m.scale.y = 0.7*2;
-  m.scale.z = dw_length;
-  for( const auto& r : robots_ )
+  if( enable_downwash_ )
   {
-    m.header.frame_id = r.name_;
-    m.id = r.unique_id_;
-    robot_markers_.markers.push_back( m );
+    float dw_length = 2.5;   // metres
+    visualization_msgs::msg::Marker m;
+    m.color.a = 0.31;
+    m.color.g = 0.71;
+    m.type = visualization_msgs::msg::Marker::SPHERE;
+    m.lifetime = rclcpp::Duration(std::chrono::seconds(2));
+    m.pose.position.x = m.pose.position.y = 0.0;
+    m.pose.position.z = dw_length/2.0;
+    m.scale.x = m.scale.y = 0.7*2;
+    m.scale.z = dw_length;
+    for( const auto& r : robots_ )
+    {
+      m.header.frame_id = r.name_;
+      m.id = r.unique_id_;
+      robot_markers_.markers.push_back( m );
+    }
   }
-
   // set up visualization for obstacles
   if( obst_pos_list_.size()%2 != 0 )
     printf( "WARN: Obstacles list must be even sized: [x1 y1 x2 y2 ..]. Skipping!\n" );
@@ -253,7 +265,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
     r1.getWorldVelocity( r1vel );
     r2.getWorldPosition( r2pos );
     r2.getWorldVelocity( r2vel );
-    // find r2's ellipse
+    // find r2's ellipsoid
     double a = 0.7;
     double c = dw_halflen;
     r2ellipse = [r2pos, a, c, dw_halflen](Eigen::Vector3d& _pos)
@@ -261,13 +273,15 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
         // with _pos as some arbitrary point of interest, the equation is:
         //    sqnorm( (_pos - (r2 + [0,0,dw])) ./ [a,a,c] )
         // which is: {(x-r2x)/a}^2 + {(y-r2y)/a}^2 + {(z-(r2z+dw))/c}^2
-        // which is the eqn of an ellipse centered at (r2x, r2y, r2z+dw).
+        // which is the eqn of an ellipsoid centered at (r2x, r2y, r2z+dw).
 
         //return  (_pos.head<2>() - r2pos.head<2>()).squaredNorm()/(a*a)
         //        + fast_approx::square( (_pos.coeff(2) - (r2pos.coeff(2)+dw_halflen))/c );
         return ( _pos - (r2pos+Eigen::Vector3d(0,0,dw_halflen)) ).cwiseQuotient(Eigen::Vector3d(a,a,c)).squaredNorm();
       };
     bool insideEllipse = r2ellipse(r1pos) < 1.0;
+    // where in the peel is r1: 0=skin surface, 1=inner core
+    float ellipsePeelFactor = r2ellipse(r1pos) - 1.50;
     if( insideEllipse )
     {
       Eigen::Vector3d r21 = r2pos-r1pos;
@@ -275,21 +289,35 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
       double mag_r21 = r21.norm();
       double mag_v21 = std::min( 4.0, std::max( 0.05, v21.norm() ) );
       // apply negated exponential curve (pos) and inv-linear curve (vel)
-      ext_f = -8.0*std::exp(-mag_r21)*(r21/mag_r21).array() - 0.08/mag_v21;
+      //ext_f = -8.0*std::exp(-mag_r21)*(r21/mag_r21).array() - 0.08/mag_v21;
+
+      double fd = -8.0*std::exp(-mag_r21);
+      double R = 1.0/v21.head<2>().norm() 
+              * ( v21.head<2>().dot(r21.head<2>())
+                 / (v21.head<2>().norm()*r21.head<2>().norm())  )
+              * std::exp(-r21.head<2>().norm())
+              * std::exp(-r21.tail<1>().norm());
+      double th = std::acos( r21.coeff(0)/(r21.head<2>().norm()) );
+      th = r21.coeff(1) < 0 ? -th : th;
+      ext_f <<  R*fast_approx::cosine(th),
+                R*fast_approx::sine(th),
+                fd;
+      
     }
   }
 
   return ext_f;
 }
 
-void FreyjaSimulator::timerTfCallback()
+void FreyjaSimulator::simMainLoopTimer()
 {
   static rclcpp::Time t_topics_updated = now();
   static rclcpp::Time t_onehertz_update = now();
   static Eigen::Vector3d robot_pos, robot_rpy, robot_extf;
+  static Vector9d robot_pva;
   static TFStamped t;
   static GeomVec3Stamped ext_f_msg;
-  //static Odom odom;
+  static CurrentState cs_msg;
 
   // make sure everyone is doing ok
   if( enable_collisions_ )
@@ -307,6 +335,7 @@ void FreyjaSimulator::timerTfCallback()
     }
   }
 
+  // apply downwash forces
   if( enable_downwash_ )
   {
     Eigen::Vector3d ext_f;
@@ -327,9 +356,12 @@ void FreyjaSimulator::timerTfCallback()
     t.header.frame_id = "map_ned";
     for( int idx=0; idx < num_robots_; idx++ )
     {
+      // fetch data for this robot
       robots_[idx].getWorldPosition(robot_pos);
       robots_[idx].getAnglesRPY(robot_rpy);
       robots_[idx].getExtForces( robot_extf );
+      robots_[idx].getPosVelAcc( robot_pva );
+      
       // fill for tf
       t.transform.translation.x = robot_pos.coeff(0);
       t.transform.translation.y = robot_pos.coeff(1);
@@ -351,6 +383,15 @@ void FreyjaSimulator::timerTfCallback()
       ext_f_msg.vector.y = robot_extf.coeff(1);
       ext_f_msg.vector.z = robot_extf.coeff(2);
       extf_pubs_[idx] -> publish( ext_f_msg );
+
+      // publish ground truth state-vector
+      for( int sv=0; sv<6; sv++ )
+        cs_msg.state_vector[sv] = robot_pva.coeff(sv);
+      cs_msg.state_vector[9] = robot_pva.coeff(6);
+      cs_msg.state_vector[10] = robot_pva.coeff(7);
+      cs_msg.state_vector[11] = robot_pva.coeff(8);
+      cs_msg.header.stamp = t_now;
+      simstate_pubs_[idx] -> publish( cs_msg );
     }
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );

@@ -61,9 +61,11 @@ struct GenericFlyer
     void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl; }
     void setExtForces( Eigen::Vector3d _extf ) { cur_extforces_ = _extf; }
     void arrestMotion() { posvelacc_.tail<6>().setZero(); }
-    void arrestMotionGround() { posvelacc_(2) = 0.0; }
-    bool onGround() { return posvelacc_.coeff(2) > -0.01; }
+    void arrestMotionGround() { posvelacc_(2) = posvelacc_(5) = 0.0; }
+    bool onGround() { return posvelacc_.coeff(2) > -0.001 && posvelacc_.coeff(8) > 0; }
     
+    void getPosVelAcc( Vector9d &_pva ) const
+      { _pva = posvelacc_; }
     void getWorldVelocity( Eigen::Vector3d &_v ) const
       { _v = posvelacc_.segment<3>(3); }
     void getWorldPosition( Eigen::Vector3d &_p ) const
@@ -122,7 +124,7 @@ void GenericFlyer::initialise_system()
             0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt,
-            Eigen::MatrixXd::Zero(3,6), Eigen::MatrixXd::Zero(3,3);
+            Eigen::MatrixXd::Zero(3,6), 0.001*Eigen::MatrixXd::Identity(3,3);
   sys_B_ << Eigen::MatrixXd::Zero(6,3),
             Eigen::MatrixXd::Identity(3,3);
   sys_Bext_ << sys_B_;
@@ -132,10 +134,19 @@ void GenericFlyer::moveRobot( const double& dt )
 {
   // called by manager process, with dt as the step time
   static Eigen::Vector3d gvec = {0.0, 0.0, fast_approx::accg};
-  posvelacc_ = sys_A_ * posvelacc_ 
-              + sys_B_ * cur_ctrlinput_.head<3>()
-              + sys_Bext_ * cur_extforces_
-              + sys_Bext_ * gvec;
+  
+ posvelacc_ = sys_A_ * posvelacc_ 
+            + sys_B_ * cur_ctrlinput_.head<3>()
+            + sys_Bext_ * cur_extforces_
+            + sys_Bext_ * gvec;
+              //- 0.25 * sys_Bext_ * posvelacc_.segment<3>(3).cwiseAbs2().cwiseProduct(posvelacc_.segment<3>(3).cwiseSign());  
+  
+  /*
+  posvelacc_.tail<3>() = -0.025*posvelacc_.tail<3>() + 0.8*cur_ctrlinput_.head<3>() + gvec + cur_extforces_;
+  posvelacc_.segment<3>(3) += step_dt_*posvelacc_.tail<3>();
+  //   posvelacc_.segment<3>(3) *= 1.0;
+  posvelacc_.head<3>() += step_dt_*posvelacc_.segment<3>(3);
+  */
   /*  if A.bottomRightCorner<3,3> is identity, B matrix can be
   *   removed and use this step separately:
   *     posvelacc_.tail<3>() = cur_ctrlinput_.head<3>() + cur_extforces_ + gvec;
@@ -151,15 +162,15 @@ void GenericFlyer::manager_process()
   const double dt = step_dt_;
   const int dt_ms = std::round(dt*1000.0);
   keep_alive_.test_and_set();
-  printf( "Starting manager process for: %s(%d)\n", name_.c_str(), unique_id_ );
+  printf( "Starting manager process for: %s(%d) with dt: %dms\n", name_.c_str(), unique_id_, dt_ms );
 
   while( keep_alive_.test_and_set() )
   {
     if( is_ok_ )
     {
+      moveRobot(dt);
       if( onGround() )
         arrestMotionGround();
-      moveRobot(dt);
 
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }
