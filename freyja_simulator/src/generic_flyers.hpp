@@ -4,8 +4,16 @@ typedef Eigen::Matrix<double, 6, 1> PosVelNED;
 typedef Eigen::Matrix<double, 6, 1> Vector6d;
 typedef Eigen::Matrix<double, 9, 1> Vector9d;
 
-struct GenericFlyer
+enum class FlyingState
 {
+  DISARMED,
+  ARMED_ONGROUND,
+  FLYING
+};
+
+class GenericFlyer
+{
+  public:
   Vector9d posvelacc_;
   Vector6d rpy_rpyrate_;
   
@@ -24,6 +32,7 @@ struct GenericFlyer
   
   volatile bool is_ok_;
   std::atomic_flag keep_alive_;
+  FlyingState air_state_;
 
   // custom robot properties
   const double MAX_LINEAR_SPD_= 2.0;
@@ -49,6 +58,7 @@ struct GenericFlyer
       sys_A_ = d.sys_A_;
       sys_B_ = d.sys_B_;
       sys_Bext_ = d.sys_Bext_;
+      air_state_ = d.air_state_;
     }
     GenericFlyer& operator=( GenericFlyer&& ) = default;
     // explicit destructor for handling shutdown
@@ -77,9 +87,12 @@ struct GenericFlyer
     
     void alert_problem() { is_ok_ = false; }
     void terminate() { keep_alive_.clear(std::memory_order_release); }
+    void arm( bool req );
     
     void moveRobot( const double& dt );
     void manager_process();
+
+    bool is_armed() { return air_state_!=FlyingState::DISARMED; }
 
 };
 
@@ -99,6 +112,7 @@ GenericFlyer::GenericFlyer( int _uid, std::string _n, double dt ) :
   cur_ctrlinput_.setZero();
   initialise_system();
   is_ok_ = false;
+  air_state_ = FlyingState::DISARMED;
 }
 void GenericFlyer::initialise_stopped( Eigen::VectorXd _pos )
 {
@@ -128,6 +142,29 @@ void GenericFlyer::initialise_system()
   sys_B_ << Eigen::MatrixXd::Zero(6,3),
             Eigen::MatrixXd::Identity(3,3);
   sys_Bext_ << sys_B_;
+}
+
+void GenericFlyer::arm( bool _req )
+{
+  switch( air_state_ )
+  {
+    case FlyingState::DISARMED:
+      {
+        air_state_ = (_req==true)? FlyingState::ARMED_ONGROUND : air_state_;
+        break;
+      }
+    case FlyingState::ARMED_ONGROUND:
+      {
+        air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
+        break;
+      }
+    case FlyingState::FLYING:
+      {
+        air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
+        std::cout << "Allowing arm/disarm calls in the air!" << std::endl;
+        break;
+      }
+  }
 }
 
 void GenericFlyer::moveRobot( const double& dt )
@@ -169,8 +206,9 @@ void GenericFlyer::manager_process()
     if( is_ok_ )
     {
       moveRobot(dt);
+      //std::cout << posvelacc_.coeff(2) << ", ";
       if( onGround() )
-        arrestMotionGround();
+        arrestMotion();
 
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }

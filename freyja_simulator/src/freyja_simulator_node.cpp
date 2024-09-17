@@ -15,6 +15,8 @@
 #include "geometry_msgs/msg/vector3.hpp"
 #include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
+#include "std_srvs/srv/set_bool.hpp"
+#include "mavros_msgs/srv/command_bool.hpp"
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/impl/utils.h>
@@ -23,6 +25,7 @@
 #include "freyja_msgs/msg/current_state.hpp"
 #include "freyja_msgs/msg/reference_state.hpp"
 #include "freyja_msgs/msg/controller_debug.hpp"
+#include "freyja_msgs/msg/freyja_interface_status.hpp"
 
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -37,8 +40,11 @@ typedef geometry_msgs::msg::Vector3           GeomVec3d;
 typedef freyja_msgs::msg::ReferenceState      RefState;
 typedef freyja_msgs::msg::ControllerDebug     CTRLDebug;
 typedef freyja_msgs::msg::CurrentState        CurrentState;
+typedef freyja_msgs::msg::FreyjaInterfaceStatus FreyjaIfaceStatus;
 typedef visualization_msgs::msg::MarkerArray  RvizMarkerArray;
 typedef geometry_msgs::msg::Vector3Stamped    GeomVec3Stamped;
+typedef std_srvs::srv::SetBool                BoolServ;
+typedef mavros_msgs::srv::CommandBool         MavrosArming;
 
 
 /* Main simulation interface */
@@ -50,7 +56,7 @@ class FreyjaSimulator : public rclcpp::Node
   std::vector<double> init_positions_;
   
   double sim_step_;
-  double topic_step_;
+  double tf_upd_interv_;
 
 
   // robots and managers
@@ -69,6 +75,9 @@ class FreyjaSimulator : public rclcpp::Node
   std::vector<rclcpp::Subscription<CTRLDebug>::SharedPtr> ctrl_subs_;
   std::vector<rclcpp::Publisher<GeomVec3Stamped>::SharedPtr> extf_pubs_;
   std::vector<rclcpp::Publisher<CurrentState>::SharedPtr> simstate_pubs_;
+  std::vector<rclcpp::Publisher<FreyjaIfaceStatus>::SharedPtr> iface_pubs_;
+  std::vector<rclcpp::Service<BoolServ>::SharedPtr> idle_servers_;
+  std::vector<rclcpp::Service<MavrosArming>::SharedPtr> arm_servers_;
 
   std::vector<TFStamped> all_tforms_;
   
@@ -126,6 +135,9 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   all_tforms_.resize(num_robots_);
   extf_pubs_.resize(num_robots_);
   simstate_pubs_.resize(num_robots_);
+  iface_pubs_.resize(num_robots_);
+  idle_servers_.resize(num_robots_);
+  arm_servers_.resize(num_robots_);
 
 
   // instantiate all robots
@@ -141,7 +153,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   rendering_setup();
 
   // set up a timer process
-  topic_step_ = 1.0/topic_rate;
+  tf_upd_interv_ = 1.0/topic_rate;
   sim_step_ = 1.0/refresh_rate;
   tf_timer_ = rclcpp::create_timer( this, get_clock(), std::chrono::duration<double>(sim_step_),
                                     std::bind(&FreyjaSimulator::simMainLoopTimer, this) );
@@ -159,11 +171,11 @@ void FreyjaSimulator::create_robots( int robots_type )
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
   {    
     int uid = uid_base + r;
-    std::string rname = "U" + std::to_string(r);
+    std::string rname = "R" + std::to_string(r);
     
     robots_.emplace_back( uid, rname, 0.005 );
     Eigen::Vector3d pos;
-    if( idx < init_positions_.size() )
+    if( (3*idx+2) < init_positions_.size() )
       pos << init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2];
     else
       pos = Eigen::Vector3d::Random() + Eigen::Vector3d(0, 0, -10.0);
@@ -176,8 +188,20 @@ void FreyjaSimulator::create_robots( int robots_type )
                               Eigen::Map<const Eigen::Vector4f> u( msg->lqr_u.data() );
                               robots_[idx].setCtrlInput( u.cast<double>() );
                             } );
+    // create clients
+    idle_servers_[idx] = create_service<BoolServ> ( rname+"/set_onground_idle",
+                            [this,idx](const BoolServ::Request::SharedPtr rq, const BoolServ::Response::SharedPtr rp )
+                            {  rp->success = true; } );
+    arm_servers_[idx] = create_service<MavrosArming> ( rname+"/mavros/cmd/arming",
+                            [this,idx,rname](const MavrosArming::Request::SharedPtr rq, const MavrosArming::Response::SharedPtr rp )
+                            {
+                              robots_[idx].arm(rq->value);
+                              rp->success = true;
+                              RCLCPP_WARN(get_logger(), "Arming: %s", rname.c_str());
+                            } );                        
     extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
     simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
+    iface_pubs_[idx] = create_publisher<FreyjaIfaceStatus>( rname + "/freyja_interface_status", 1 );
   }
   printf( "All robots created. Starting managers..\n" );
 
@@ -311,13 +335,15 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
 
 void FreyjaSimulator::simMainLoopTimer()
 {
-  static rclcpp::Time t_topics_updated = now();
-  static rclcpp::Time t_onehertz_update = now();
+  static rclcpp::Time t_state_topic_upd = now();
+  static rclcpp::Time t_onehertz_upd = now();
+  static rclcpp::Time t_iface_upd = now();
   static Eigen::Vector3d robot_pos, robot_rpy, robot_extf;
   static Vector9d robot_pva;
   static TFStamped t;
   static GeomVec3Stamped ext_f_msg;
   static CurrentState cs_msg;
+  static FreyjaIfaceStatus iface_msg;
 
   // make sure everyone is doing ok
   if( enable_collisions_ )
@@ -350,7 +376,7 @@ void FreyjaSimulator::simMainLoopTimer()
 
   // update topics/vis every so often
   rclcpp::Time t_now = now();
-  if( (t_now - t_topics_updated).seconds() > topic_step_ )
+  if( (t_now - t_state_topic_upd).seconds() > tf_upd_interv_ )
   {
     // get everyone's poses
     t.header.frame_id = "map_ned";
@@ -397,14 +423,28 @@ void FreyjaSimulator::simMainLoopTimer()
     tf_broadcaster_ -> sendTransform( all_tforms_ );
     // publish markers
     rviz_robotmarker_pub_ -> publish( robot_markers_ );
-    t_topics_updated = t_now;
+    t_state_topic_upd = t_now;
   }
 
   // slow updates
-  if( (t_now - t_onehertz_update).seconds() > 1.0 )
+  if( (t_now - t_onehertz_upd).seconds() > 1.0 )
   {
     rviz_obstmarker_pub_ -> publish( obst_markers_ );
-    t_onehertz_update = t_now;
+    t_onehertz_upd = t_now;
+  }
+
+  if( (t_now - t_iface_upd).seconds() > 0.1 )
+  {
+    for( int idx=0; idx < num_robots_; idx++ )
+    {
+      iface_msg.armed = robots_[idx].is_armed();
+      iface_msg.connected = true;
+      iface_msg.computer_ctrl = true;
+      iface_msg.rtk_fix_ok = true;
+      iface_msg.rtk_carrsol = 2;
+
+      iface_pubs_[idx] -> publish(iface_msg);
+    }
   }
 }
 

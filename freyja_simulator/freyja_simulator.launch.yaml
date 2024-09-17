@@ -20,9 +20,9 @@ launch:
       exec:       "freyja_simulator_node"
       output:     "screen"
       param:
-      - { name:   "robot_num_range",    value:  [1, 2] }              # [i,j] robots numbered [Ui..Uj]
+      - { name:   "robot_num_range",    value:  [101, 105] }          # [i,j] robots numbered [Ri..Rj]
       - { name:   "init_positions",     value:  [-2.0, 2.0, -1.5,
-                                                 -1.0, 1.0, -1.5] }   # [pn,pe,pd]*N, 3*N sized array
+                                                 -1.0, 1.0, -1.5] }   # [pn,pe,pd]*N, 3*N sized array; remaining robots init randomly
       - { name:   "team_color",         value:  [0.7, 0.0, 0.0] }     # marker color, rgb
       - { name:   "team_id",            value:  0 }                   # common id for these robots
       - { name:   "sim_rate",           value:  150.0 }               # main sim rate, robot sim at (fixed) high rate

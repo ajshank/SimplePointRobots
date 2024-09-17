@@ -16,9 +16,11 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(freyja_msgs REQUIRED)
+find_package(mavros_msgs REQUIRED)
 
 add_executable(freyja_simulator_node src/freyja_simulator_node.cpp)
 target_include_directories(freyja_simulator_node PUBLIC
@@ -34,9 +36,11 @@ ament_target_dependencies(
   "tf2_ros"
   "nav_msgs"
   "std_msgs"
+  "std_srvs"
   "sensor_msgs"
   "visualization_msgs"
   freyja_msgs
+  mavros_msgs
 )
 
 install(TARGETS freyja_simulator_node
