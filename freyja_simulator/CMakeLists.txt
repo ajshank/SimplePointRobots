@@ -5,7 +5,8 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wno-reorder)
 endif()
 
-add_compile_options(-std=c++14 -O3 -ffast-math)
+set(CMAKE_CXX_STANDARD 17)
+add_compile_options(-O3 -ffast-math)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
