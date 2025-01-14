@@ -52,6 +52,7 @@ typedef mavros_msgs::srv::CommandBool         MavrosArming;
 class FreyjaSimulator : public rclcpp::Node
 {
   int num_robots_;
+  std::string platf_basename_;
   std::vector<long int> robot_num_range_;
   std::vector<double> init_positions_;
   
@@ -64,6 +65,7 @@ class FreyjaSimulator : public rclcpp::Node
   std::vector<std::thread> robot_mgrs_;
   bool enable_collisions_;
   bool enable_downwash_;
+  bool publish_gt_curstate_;
 
   visualization_msgs::msg::MarkerArray robot_markers_;
 
@@ -78,6 +80,8 @@ class FreyjaSimulator : public rclcpp::Node
   std::vector<rclcpp::Publisher<FreyjaIfaceStatus>::SharedPtr> iface_pubs_;
   std::vector<rclcpp::Service<BoolServ>::SharedPtr> idle_servers_;
   std::vector<rclcpp::Service<MavrosArming>::SharedPtr> arm_servers_;
+
+  rclcpp::CallbackGroup::SharedPtr reentr_subs_grp_; 
 
   std::vector<TFStamped> all_tforms_;
   
@@ -105,25 +109,30 @@ FreyjaSimulator::~FreyjaSimulator()
 FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 {
   declare_parameter<std::vector<long int>>( "robot_num_range", std::vector<long int>({3, 7}) );
+  declare_parameter<std::string>("platf_basename", "R");
   declare_parameter<std::vector<double>>( "init_positions", std::vector<double>({-2.0, 2.0, -3.0}) );
   declare_parameter<double>("sim_rate", 50.0);
   declare_parameter<double>("topic_rate", 30.0);
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
   declare_parameter<int>( "team_id", 0 );
-  declare_parameter<bool>( "enable_collisions", false );
-  declare_parameter<bool>( "enable_downwash", false );
   declare_parameter<std::string>( "robots_type", "diffdrive" );
   declare_parameter<std::vector<double>>( "obst_pos_list", std::vector<double>({-1.0}) );
+  declare_parameter<bool>( "enable_collisions", false );
+  declare_parameter<bool>( "enable_downwash", false );
+  declare_parameter<bool>( "publish_gt_curstate", false );
   
   double refresh_rate, topic_rate;
   std::string robot_type_str;
   get_parameter( "robot_num_range", robot_num_range_ );
+  get_parameter( "platf_basename", platf_basename_ );
   get_parameter( "init_positions", init_positions_ );
   get_parameter( "sim_rate", refresh_rate );
   get_parameter( "topic_rate", topic_rate );
+  get_parameter( "obst_pos_list", obst_pos_list_ );
   get_parameter( "enable_collisions", enable_collisions_ );
   get_parameter( "enable_downwash", enable_downwash_ );
-  get_parameter( "obst_pos_list", obst_pos_list_ );
+  get_parameter( "publish_gt_curstate", publish_gt_curstate_ );
+
 
   // pre-setup
   num_robots_ = int( robot_num_range_[1] - robot_num_range_[0] + 1 );
@@ -162,18 +171,26 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 
 void FreyjaSimulator::create_robots( int robots_type )
 {
+  // Robots get a unique internal id. This is unlikely to be useful anymore, but is
+  // kept for compatibility reasons (may come in handy though).
   std::random_device rd;
   std::default_random_engine rand_engine(rd());
-  std::uniform_int_distribution<> uid_dist(200,300);
+  std::uniform_int_distribution<> uid_dist(100,1000);
   std::uniform_real_distribution<> position_dist(-1.0, 1.0);
   int uid_base = uid_dist(rand_engine);
+
+  reentr_subs_grp_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = reentr_subs_grp_;
+
   int idx = 0;
+  double dynstep_dt = 1.0/200.0;    // dynamics updated at this rate (must be >=1ms)
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
   {    
     int uid = uid_base + r;
-    std::string rname = "R" + std::to_string(r);
+    std::string rname = platf_basename_ + std::to_string(r);
     
-    robots_.emplace_back( uid, rname, 0.005 );
+    robots_.emplace_back( uid, rname, dynstep_dt );
     Eigen::Vector3d pos;
     if( (3*idx+2) < init_positions_.size() )
       pos << init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2];
@@ -184,10 +201,11 @@ void FreyjaSimulator::create_robots( int robots_type )
     // create subscriber
     ctrl_subs_[idx] = create_subscription<CTRLDebug> ( rname + "/controller_debug", 1,
                             [this,idx](const CTRLDebug::ConstSharedPtr msg)
-                            {
+                            {//. reentrant cb-group; make sure this is thread-safe.
                               Eigen::Map<const Eigen::Vector4f> u( msg->lqr_u.data() );
                               robots_[idx].setCtrlInput( u.cast<double>() );
-                            } );
+                            },
+                            options );
     // create clients
     idle_servers_[idx] = create_service<BoolServ> ( rname+"/set_onground_idle",
                             [this,idx](const BoolServ::Request::SharedPtr rq, const BoolServ::Response::SharedPtr rp )
@@ -200,8 +218,9 @@ void FreyjaSimulator::create_robots( int robots_type )
                               RCLCPP_WARN(get_logger(), "Arming: %s", rname.c_str());
                             } );                        
     extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
-    simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
     iface_pubs_[idx] = create_publisher<FreyjaIfaceStatus>( rname + "/freyja_interface_status", 1 );
+    if( publish_gt_curstate_ )
+      simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
   }
   printf( "All robots created. Starting managers..\n" );
 
@@ -292,7 +311,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
     // find r2's ellipsoid
     double a = 0.7;
     double c = dw_halflen;
-    r2ellipse = [r2pos, a, c, dw_halflen](Eigen::Vector3d& _pos)
+    r2ellipse = [&r2pos, &a, &c, &dw_halflen](Eigen::Vector3d& _pos)
       {
         // with _pos as some arbitrary point of interest, the equation is:
         //    sqnorm( (_pos - (r2 + [0,0,dw])) ./ [a,a,c] )
@@ -304,7 +323,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
         return ( _pos - (r2pos+Eigen::Vector3d(0,0,dw_halflen)) ).cwiseQuotient(Eigen::Vector3d(a,a,c)).squaredNorm();
       };
     bool insideEllipse = r2ellipse(r1pos) < 1.0;
-    // where in the peel is r1: 0=skin surface, 1=inner core
+    // where in the ellipse-peel is r1? 0=skin surface, 1=inner core
     float ellipsePeelFactor = r2ellipse(r1pos) - 1.50;
     if( insideEllipse )
     {
@@ -315,6 +334,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
       // apply negated exponential curve (pos) and inv-linear curve (vel)
       //ext_f = -8.0*std::exp(-mag_r21)*(r21/mag_r21).array() - 0.08/mag_v21;
 
+      // the following is equivariant (contributed by H.Smith)
       double fd = -8.0*std::exp(-mag_r21);
       double R = 1.0/v21.head<2>().norm() 
               * ( v21.head<2>().dot(r21.head<2>())
@@ -369,7 +389,8 @@ void FreyjaSimulator::simMainLoopTimer()
     {
       ext_f.setZero();
       for( int j=0; j<num_robots_; j++ )
-        ext_f += computeDownwash( robots_[i], robots_[j] );
+        if(i != j)
+          ext_f += computeDownwash( robots_[i], robots_[j] );
       robots_[i].setExtForces( ext_f );
     }
   }
@@ -403,7 +424,7 @@ void FreyjaSimulator::simMainLoopTimer()
       t.child_frame_id = robots_[idx].name_;
       all_tforms_[idx] = t;
 
-      // publish forces
+      // publish known forces acting on the system
       ext_f_msg.header.stamp = t_now;
       ext_f_msg.vector.x = robot_extf.coeff(0);
       ext_f_msg.vector.y = robot_extf.coeff(1);
@@ -411,13 +432,16 @@ void FreyjaSimulator::simMainLoopTimer()
       extf_pubs_[idx] -> publish( ext_f_msg );
 
       // publish ground truth state-vector
-      for( int sv=0; sv<6; sv++ )
-        cs_msg.state_vector[sv] = robot_pva.coeff(sv);
-      cs_msg.state_vector[9] = robot_pva.coeff(6);
-      cs_msg.state_vector[10] = robot_pva.coeff(7);
-      cs_msg.state_vector[11] = robot_pva.coeff(8);
-      cs_msg.header.stamp = t_now;
-      simstate_pubs_[idx] -> publish( cs_msg );
+      if( publish_gt_curstate_ )
+      {
+        for( int sv=0; sv<6; sv++ )
+          cs_msg.state_vector[sv] = robot_pva.coeff(sv);
+        cs_msg.state_vector[9] = robot_pva.coeff(6);
+        cs_msg.state_vector[10] = robot_pva.coeff(7);
+        cs_msg.state_vector[11] = robot_pva.coeff(8);
+        cs_msg.header.stamp = t_now;
+        simstate_pubs_[idx] -> publish( cs_msg );
+      }
     }
     // publish tf
     tf_broadcaster_ -> sendTransform( all_tforms_ );
