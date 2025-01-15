@@ -67,6 +67,10 @@ class FreyjaSimulator : public rclcpp::Node
   bool enable_downwash_;
   bool publish_gt_curstate_;
 
+  // some robot params
+  double dw_ellipse_a_;     // ellipse-a [m] for downwash 
+  double dw_expo_ampl_;     // downwash amplitude scaling: A*exp(..)
+
   visualization_msgs::msg::MarkerArray robot_markers_;
 
   // global visualization obstacles
@@ -120,6 +124,9 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<bool>( "enable_collisions", false );
   declare_parameter<bool>( "enable_downwash", false );
   declare_parameter<bool>( "publish_gt_curstate", false );
+
+  declare_parameter<double>( "dwash_ellipse_a", 0.3 );
+  declare_parameter<double>( "dwash_expo_ampl", 5.0 );
   
   double refresh_rate, topic_rate;
   std::string robot_type_str;
@@ -132,6 +139,9 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   get_parameter( "enable_collisions", enable_collisions_ );
   get_parameter( "enable_downwash", enable_downwash_ );
   get_parameter( "publish_gt_curstate", publish_gt_curstate_ );
+
+  get_parameter( "dwash_ellipse_a", dw_ellipse_a_ );
+  get_parameter( "dwash_expo_ampl", dw_expo_ampl_ );
 
 
   // pre-setup
@@ -247,7 +257,7 @@ void FreyjaSimulator::rendering_setup()
     m.lifetime = rclcpp::Duration(std::chrono::seconds(2));
     m.pose.position.x = m.pose.position.y = 0.0;
     m.pose.position.z = dw_length/2.0;
-    m.scale.x = m.scale.y = 0.7*2;
+    m.scale.x = m.scale.y = dw_ellipse_a_*2;
     m.scale.z = dw_length;
     for( const auto& r : robots_ )
     {
@@ -309,7 +319,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
     r2.getWorldPosition( r2pos );
     r2.getWorldVelocity( r2vel );
     // find r2's ellipsoid
-    double a = 0.7;
+    double a = dw_ellipse_a_;
     double c = dw_halflen;
     r2ellipse = [&r2pos, &a, &c, &dw_halflen](Eigen::Vector3d& _pos)
       {
@@ -335,7 +345,7 @@ Eigen::Vector3d FreyjaSimulator::computeDownwash( const GenericFlyer &r1, const 
       //ext_f = -8.0*std::exp(-mag_r21)*(r21/mag_r21).array() - 0.08/mag_v21;
 
       // the following is equivariant (contributed by H.Smith)
-      double fd = -8.0*std::exp(-mag_r21);
+      double fd = dw_expo_ampl_*std::exp(-mag_r21);
       double R = 1.0/v21.head<2>().norm() 
               * ( v21.head<2>().dot(r21.head<2>())
                  / (v21.head<2>().norm()*r21.head<2>().norm())  )
