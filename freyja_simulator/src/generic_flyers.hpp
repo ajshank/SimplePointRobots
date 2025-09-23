@@ -1,4 +1,6 @@
 #include <eigen3/Eigen/Dense>
+#include "flightlib/objects/quadrotor.hpp"
+#include "flightlib/common/quad_state.hpp"
 
 typedef Eigen::Matrix<double, 6, 1> PosVelNED;
 typedef Eigen::Matrix<double, 6, 1> Vector6d;
@@ -13,6 +15,10 @@ enum class FlyingState
 
 class GenericFlyer
 {
+  flightlib::Quadrotor robot_;
+  flightlib::Command robot_cmd_;
+  flightlib::QuadState quad_state_;
+
   public:
   Vector9d posvelacc_;
   Vector6d rpy_rpyrate_;
@@ -68,7 +74,11 @@ class GenericFlyer
 
     void initialise_stopped( Eigen::VectorXd _pos );
     void setVelocity( Eigen::Vector3d _tgt_vel ) { posvelacc_.segment<3>(3) = _tgt_vel; }
-    void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl; }
+    void setCtrlInput( const Eigen::Vector4d _ctrl )
+    {
+      robot_cmd_.omega << _ctrl.head<2>().cast<float>(), float(_ctrl.coeff(3));
+      robot_cmd_.collective_thrust = -static_cast<float>(_ctrl.coeff(2)) + fast_approx::accg;
+    }
     void setExtForces( Eigen::Vector3d _extf ) { cur_extforces_ = _extf; }
     void arrestMotion() { posvelacc_.tail<6>().setZero(); }
     void arrestMotionGround() { posvelacc_(2) = posvelacc_(5) = 0.0; }
@@ -124,8 +134,24 @@ void GenericFlyer::initialise_stopped( Eigen::VectorXd _pos )
 
   is_ok_ = true;
   keep_alive_.test_and_set();
-  printf( "Robot instance: %s(%d), pos: [%0.3f, %0.3f, %0.3f]\n",
-                      name_.c_str(), unique_id_, posvelacc_(0), posvelacc_(1), posvelacc_(2) );
+
+
+
+
+  // hovering test
+  quad_state_.setZero();
+  quad_state_.p = _pos.cast<float>();
+  robot_.reset(quad_state_);
+  robot_cmd_.omega.setZero();
+  robot_cmd_.collective_thrust = 1.05*fast_approx::accg;
+  robot_cmd_.t = 0.0;
+
+  printf( "Robot instance: %s(%d), pos: [%0.3f, %0.3f, %0.3f], cmd_valid: %d\n",
+          name_.c_str(), unique_id_, robot_.getPosition().coeff(0), robot_.getPosition().coeff(1), robot_.getPosition().coeff(2),
+         robot_cmd_.valid());
+  std::cout << robot_cmd_.t << "[s], w=" << robot_cmd_.omega.transpose() << " thr="
+            << robot_cmd_.collective_thrust << " rotors=" << robot_cmd_.thrusts.transpose()
+            << std::endl;
 }
 
 void GenericFlyer::initialise_system()
@@ -196,20 +222,27 @@ void GenericFlyer::moveRobot( const double& dt )
 
 void GenericFlyer::manager_process()
 {
-  const double dt = step_dt_;
+  const float dt = step_dt_;
   const int dt_ms = std::round(dt*1000.0);
   keep_alive_.test_and_set();
-  printf( "Starting manager process for: %s(%d) with dt: %dms\n", name_.c_str(), unique_id_, dt_ms );
+  printf( "Starting manager process for: %s(%d) with dt: %dms, pos: [%0.3f, %0.3f, %0.3f], valid: %d\n",
+          name_.c_str(), unique_id_, dt_ms, robot_.getPosition().coeff(0), robot_.getPosition().coeff(1), robot_.getPosition().coeff(2),
+         robot_.getDynamics().valid());
+  //std::cout << robot_.getPosition().transpose() << std::endl;
 
   while( keep_alive_.test_and_set() )
   {
     if( is_ok_ )
     {
-      moveRobot(dt);
-      //std::cout << posvelacc_.coeff(2) << ", ";
-      if( onGround() )
+      if( !robot_.setCommand(robot_cmd_) ) std::cout << "Command invalid!" << std::endl;
+      if( !robot_.run(dt) ) std::cout << "Could not step flyer!" << std::endl;
+      if( onGround() || false )
         arrestMotion();
-
+      // update state
+      robot_.getState(&quad_state_);
+      posvelacc_.segment<3>(0) = quad_state_.p.cast<double>();
+      std::cout << robot_cmd_.collective_thrust << " Newtons, "
+                << robot_.getPosition().transpose() << std::endl;
       std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
     }
     else

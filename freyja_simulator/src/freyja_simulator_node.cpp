@@ -16,7 +16,7 @@
 #include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "std_srvs/srv/set_bool.hpp"
-#include "mavros_msgs/srv/command_bool.hpp"
+//#include "mavros_msgs/srv/command_bool.hpp"
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/impl/utils.h>
@@ -44,7 +44,7 @@ typedef freyja_msgs::msg::FreyjaInterfaceStatus FreyjaIfaceStatus;
 typedef visualization_msgs::msg::MarkerArray  RvizMarkerArray;
 typedef geometry_msgs::msg::Vector3Stamped    GeomVec3Stamped;
 typedef std_srvs::srv::SetBool                BoolServ;
-typedef mavros_msgs::srv::CommandBool         MavrosArming;
+//typedef mavros_msgs::srv::CommandBool         MavrosArming;
 
 
 /* Main simulation interface */
@@ -83,7 +83,7 @@ class FreyjaSimulator : public rclcpp::Node
   std::vector<rclcpp::Publisher<CurrentState>::SharedPtr> simstate_pubs_;
   std::vector<rclcpp::Publisher<FreyjaIfaceStatus>::SharedPtr> iface_pubs_;
   std::vector<rclcpp::Service<BoolServ>::SharedPtr> idle_servers_;
-  std::vector<rclcpp::Service<MavrosArming>::SharedPtr> arm_servers_;
+  //std::vector<rclcpp::Service<MavrosArming>::SharedPtr> arm_servers_;
 
   rclcpp::CallbackGroup::SharedPtr reentr_subs_grp_; 
 
@@ -150,13 +150,14 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   assert( num_robots_ > 0 );
   assert( init_positions_.size()%3 == 0 );
 
+  robots_.reserve(num_robots_);
   ctrl_subs_.resize(num_robots_);
   all_tforms_.resize(num_robots_);
   extf_pubs_.resize(num_robots_);
   simstate_pubs_.resize(num_robots_);
   iface_pubs_.resize(num_robots_);
   idle_servers_.resize(num_robots_);
-  arm_servers_.resize(num_robots_);
+  //arm_servers_.resize(num_robots_);
 
 
   // instantiate all robots
@@ -194,20 +195,24 @@ void FreyjaSimulator::create_robots( int robots_type )
   options.callback_group = reentr_subs_grp_;
 
   int idx = 0;
-  double dynstep_dt = 1.0/200.0;    // dynamics updated at this rate (must be >=1ms)
+  double dynstep_dt = 1.0/20.0;    // dynamics updated at this rate (must be >=1ms)
   for( int r=robot_num_range_[0]; r<=robot_num_range_[1]; r++, idx++ )
   {    
     int uid = uid_base + r;
     std::string rname = platf_basename_ + std::to_string(r);
+    RCLCPP_INFO(get_logger(), "Initialising robot: %d, %s..", idx, rname.c_str());
     
     robots_.emplace_back( uid, rname, dynstep_dt );
+    RCLCPP_INFO(get_logger(), "Allocated robot: %d, %s..", idx, rname.c_str());
     Eigen::Vector3d pos;
     if( (3*idx+2) < init_positions_.size() )
       pos << init_positions_[3*idx], init_positions_[3*idx+1], init_positions_[3*idx+2];
     else
       pos = Eigen::Vector3d::Random() + Eigen::Vector3d(0, 0, -10.0);
 
+
     robots_[idx].initialise_stopped( pos );
+    RCLCPP_INFO(get_logger(), "Preparing interf. for robot: %d, %s..", idx, rname.c_str());
     // create subscriber
     ctrl_subs_[idx] = create_subscription<CTRLDebug> ( rname + "/controller_debug", 1,
                             [this,idx](const CTRLDebug::ConstSharedPtr msg)
@@ -220,13 +225,13 @@ void FreyjaSimulator::create_robots( int robots_type )
     idle_servers_[idx] = create_service<BoolServ> ( rname+"/set_onground_idle",
                             [this,idx](const BoolServ::Request::SharedPtr rq, const BoolServ::Response::SharedPtr rp )
                             {  rp->success = true; } );
-    arm_servers_[idx] = create_service<MavrosArming> ( rname+"/mavros/cmd/arming",
+    /*arm_servers_[idx] = create_service<MavrosArming> ( rname+"/mavros/cmd/arming",
                             [this,idx,rname](const MavrosArming::Request::SharedPtr rq, const MavrosArming::Response::SharedPtr rp )
                             {
                               robots_[idx].arm(rq->value);
                               rp->success = true;
                               RCLCPP_WARN(get_logger(), "Arming: %s", rname.c_str());
-                            } );                        
+                            } ); */
     extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
     iface_pubs_[idx] = create_publisher<FreyjaIfaceStatus>( rname + "/freyja_interface_status", 1 );
     if( publish_gt_curstate_ )

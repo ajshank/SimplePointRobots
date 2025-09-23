@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.20)
 project(freyja_simulator)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -6,7 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
-add_compile_options(-O3 -ffast-math)
+add_compile_options(-O3)# -fno-math-errno -fno-trapping-math)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -21,13 +21,27 @@ find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(freyja_msgs REQUIRED)
-find_package(mavros_msgs REQUIRED)
+#find_package(mavros_msgs REQUIRED)
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+find_library(zmqpp-s NAMES libzmqpp.so
+  PATHS /opt/ros/kilted/lib/
+  REQUIRED)
+
+link_directories(/opt/ros/kilted/lib)
+
+add_subdirectory(extern/flightlib)
 
 add_executable(freyja_simulator_node src/freyja_simulator_node.cpp)
 target_include_directories(freyja_simulator_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/flightlib/include>
   $<INSTALL_INTERFACE:include>)
 target_compile_features(freyja_simulator_node PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+target_link_libraries(freyja_simulator_node
+  flightlib
+  zmqpp
+)
 ament_target_dependencies(
   freyja_simulator_node
   "rclcpp"
@@ -41,21 +55,12 @@ ament_target_dependencies(
   "sensor_msgs"
   "visualization_msgs"
   freyja_msgs
-  mavros_msgs
+  # mavros_msgs
 )
 
 install(TARGETS freyja_simulator_node
   DESTINATION lib/${PROJECT_NAME})
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # uncomment the line when a copyright and license is not present in all source files
-  #set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # uncomment the line when this package is not in a git repo
-  #set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
+
 
 ament_package()
