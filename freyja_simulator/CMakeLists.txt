@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.20)
 project(freyja_simulator)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -21,7 +21,7 @@ find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(freyja_msgs REQUIRED)
-find_package(mavros_msgs REQUIRED)
+#find_package(mavros_msgs REQUIRED)
 
 add_executable(freyja_simulator_node src/freyja_simulator_node.cpp)
 target_include_directories(freyja_simulator_node PUBLIC
@@ -41,7 +41,7 @@ ament_target_dependencies(
   "sensor_msgs"
   "visualization_msgs"
   freyja_msgs
-  mavros_msgs
+  #mavros_msgs
 )
 
 install(TARGETS freyja_simulator_node

@@ -11,27 +11,9 @@ enum class FlyingState
   FLYING
 };
 
-class GenericFlyer
+class GenericFlyer : public GenericRobot
 {
-  public:
-  Vector9d posvelacc_;
-  Vector6d rpy_rpyrate_;
-  
-  Eigen::Vector3d cur_extforces_;
-  Eigen::Vector4d cur_ctrlinput_;
-
-  double total_mass_;
-
-  Eigen::Matrix<double, 9, 9> sys_A_;
-  Eigen::Matrix<double, 9, 3> sys_B_, sys_Bext_;
-
-  double step_dt_;
-
-  int unique_id_;
-  std::string name_;
-  
-  volatile bool is_ok_;
-  std::atomic_flag keep_alive_;
+public:
   FlyingState air_state_;
 
   // custom robot properties
@@ -39,73 +21,41 @@ class GenericFlyer
   const double MAX_LINEAR_ACC_ = 1.0;
 
   public:
+    using GenericRobot::GenericRobot;
     GenericFlyer( int, std::string, double );
     // forbid copy
     GenericFlyer( const GenericFlyer& ) = delete;
     GenericFlyer& operator=( const GenericFlyer& ) = delete;
     
     // allow move
-    GenericFlyer( GenericFlyer&& d):  total_mass_(d.total_mass_),
-                                      step_dt_(d.step_dt_),
-                                      unique_id_(d.unique_id_),
-                                      name_(std::move(d.name_))
 
-    {
-      posvelacc_ = d.posvelacc_;
-      rpy_rpyrate_ = d.rpy_rpyrate_;
-      cur_extforces_ = d.cur_extforces_;
-      cur_ctrlinput_ = d.cur_ctrlinput_;
-      sys_A_ = d.sys_A_;
-      sys_B_ = d.sys_B_;
-      sys_Bext_ = d.sys_Bext_;
-      air_state_ = d.air_state_;
-    }
     GenericFlyer& operator=( GenericFlyer&& ) = default;
     // explicit destructor for handling shutdown
-    ~GenericFlyer();
+    ~GenericFlyer() { terminate(); };
 
+    // some internal functions this object needs (cannot be called from parent!)
     void initialise_system();
-
-    void initialise_stopped( Eigen::VectorXd _pos );
-    void setVelocity( Eigen::Vector3d _tgt_vel ) { posvelacc_.segment<3>(3) = _tgt_vel; }
-    void setCtrlInput( const Eigen::Vector4d _ctrl ) { cur_ctrlinput_ = _ctrl; }
-    void setExtForces( Eigen::Vector3d _extf ) { cur_extforces_ = _extf; }
-    void arrestMotion() { posvelacc_.tail<6>().setZero(); }
-    void arrestMotionGround() { posvelacc_(2) = posvelacc_(5) = 0.0; }
+    void arrestMotionVertical() { posvelacc_(2) = posvelacc_(5) = 0.0; }
     bool onGround() { return posvelacc_.coeff(2) > -0.001 && posvelacc_.coeff(8) > 0; }
     
-    void getPosVelAcc( Vector9d &_pva ) const
-      { _pva = posvelacc_; }
-    void getWorldVelocity( Eigen::Vector3d &_v ) const
-      { _v = posvelacc_.segment<3>(3); }
-    void getWorldPosition( Eigen::Vector3d &_p ) const
-      { _p = posvelacc_.segment<3>(0); }
-    void getAnglesRPY( Eigen::Vector3d &_a ) const
-      { _a = rpy_rpyrate_.segment<3>(0); }
-    void getExtForces( Eigen::Vector3d &_f ) const
-      { _f = cur_extforces_; }
+    // some fcns from parent we override on purpose
+    void set_arm(bool _req) override;
+    bool is_armed() override { return air_state_!=FlyingState::DISARMED; }
     
-    void alert_problem() { is_ok_ = false; }
-    void terminate() { keep_alive_.clear(std::memory_order_release); }
-    void arm( bool req );
-    
-    void moveRobot( const double& dt );
-    void manager_process();
-
-    bool is_armed() { return air_state_!=FlyingState::DISARMED; }
-
+    // some functions from parent that this needs to implement
+    void setCtrlInput(const Eigen::Vector4d& _u) override
+      { cur_ctrlinput_ = _u; }
+    void setExtForces(const Eigen::Vector4d& _d) override
+      { cur_extforces_ = _d; }
+    void initialise_stopped(const Eigen::Vector3d& _pos) override;
+    void moveRobotStep(const double& dt) override;
 };
 
-GenericFlyer::~GenericFlyer()
+GenericFlyer::GenericFlyer(int _uid, std::string _n, double dt)
 {
-  terminate();
-}
-
-GenericFlyer::GenericFlyer( int _uid, std::string _n, double dt ) : 
-                                    unique_id_(_uid),
-                                    name_(std::move(_n)),
-                                    step_dt_(dt)
-{
+  unique_id_  = _uid;
+  name_ = std::move(_n);
+  step_dt_ = dt;
   posvelacc_.setZero();
   rpy_rpyrate_.setZero();
   cur_extforces_.setZero();
@@ -113,8 +63,52 @@ GenericFlyer::GenericFlyer( int _uid, std::string _n, double dt ) :
   initialise_system();
   is_ok_ = false;
   air_state_ = FlyingState::DISARMED;
+  robot_type_ = RobotType::AERIAL;
 }
-void GenericFlyer::initialise_stopped( Eigen::VectorXd _pos )
+
+void GenericFlyer::initialise_system()
+{
+  double dt = step_dt_;
+  double dt2 = 0.5*dt*dt;
+  sys_A_ << 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2, 0.0, 0.0,
+  0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2, 0.0,
+  0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2,
+  0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt,
+  Eigen::MatrixXd::Zero(3,6), 0.001*Eigen::MatrixXd::Identity(3,3);
+  sys_B_ << Eigen::MatrixXd::Zero(6,3),
+            Eigen::MatrixXd::Identity(3,3);
+  sys_Bext_ = sys_B_;
+}
+
+void GenericFlyer::set_arm( bool _req )
+{
+  switch( air_state_ )
+  {
+    case FlyingState::DISARMED:
+    {
+      air_state_ = (_req==true)? FlyingState::ARMED_ONGROUND : air_state_;
+      break;
+    }
+    case FlyingState::ARMED_ONGROUND:
+    {
+      air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
+      break;
+    }
+    case FlyingState::FLYING:
+    {
+      air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
+      std::cout << "Allowing arm/disarm calls in the air!" << std::endl;
+      break;
+    }
+  }
+  // set this variable anyway
+  is_armed_ = (air_state_ == FlyingState::ARMED_ONGROUND)
+  || (air_state_ == FlyingState::FLYING);
+}
+
+void GenericFlyer::initialise_stopped(const Eigen::Vector3d& _pos)
 {
   posvelacc_.head<3>() = _pos;
   posvelacc_.tail<6>().setZero();
@@ -128,96 +122,38 @@ void GenericFlyer::initialise_stopped( Eigen::VectorXd _pos )
                       name_.c_str(), unique_id_, posvelacc_(0), posvelacc_(1), posvelacc_(2) );
 }
 
-void GenericFlyer::initialise_system()
-{
-  double dt = step_dt_;
-  double dt2 = 0.5*dt*dt;
-  sys_A_ << 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2, 0.0, 0.0, 
-            0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2, 0.0,
-            0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0, dt2,
-            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, dt,
-            Eigen::MatrixXd::Zero(3,6), 0.001*Eigen::MatrixXd::Identity(3,3);
-  sys_B_ << Eigen::MatrixXd::Zero(6,3),
-            Eigen::MatrixXd::Identity(3,3);
-  sys_Bext_ << sys_B_;
-}
-
-void GenericFlyer::arm( bool _req )
-{
-  switch( air_state_ )
-  {
-    case FlyingState::DISARMED:
-      {
-        air_state_ = (_req==true)? FlyingState::ARMED_ONGROUND : air_state_;
-        break;
-      }
-    case FlyingState::ARMED_ONGROUND:
-      {
-        air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
-        break;
-      }
-    case FlyingState::FLYING:
-      {
-        air_state_ = (_req==false)? FlyingState::DISARMED : air_state_;
-        std::cout << "Allowing arm/disarm calls in the air!" << std::endl;
-        break;
-      }
-  }
-}
-
-void GenericFlyer::moveRobot( const double& dt )
+void GenericFlyer::moveRobotStep( const double& dt )
 {
   // called by manager process, with dt as the step time
+  // This function should handle ground collisions if needed.
+  if(air_state_ == FlyingState::DISARMED)
+  {
+    printf("%d: Not armed!", unique_id_);
+    return;
+  }
+
   static Eigen::Vector3d gvec = {0.0, 0.0, fast_approx::accg};
   
- posvelacc_ = sys_A_ * posvelacc_ 
-            + sys_B_ * cur_ctrlinput_.head<3>()
-            + sys_Bext_ * cur_extforces_
-            + sys_Bext_ * gvec;
-              //- 0.25 * sys_Bext_ * posvelacc_.segment<3>(3).cwiseAbs2().cwiseProduct(posvelacc_.segment<3>(3).cwiseSign());  
-  
-  /*
-  posvelacc_.tail<3>() = -0.025*posvelacc_.tail<3>() + 0.8*cur_ctrlinput_.head<3>() + gvec + cur_extforces_;
-  posvelacc_.segment<3>(3) += step_dt_*posvelacc_.tail<3>();
-  //   posvelacc_.segment<3>(3) *= 1.0;
-  posvelacc_.head<3>() += step_dt_*posvelacc_.segment<3>(3);
-  */
-  /*  if A.bottomRightCorner<3,3> is identity, B matrix can be
-  *   removed and use this step separately:
-  *     posvelacc_.tail<3>() = cur_ctrlinput_.head<3>() + cur_extforces_ + gvec;
-  */
+  posvelacc_ = sys_A_ * posvelacc_
+              + sys_B_ * cur_ctrlinput_.head<3>()
+              + sys_Bext_ * cur_extforces_.head<3>()
+              + sys_Bext_ * gvec;
+  if(onGround())
+    arrestMotionVertical();
   
   // update angles naively using ang-rate, and overwrite yaw-rate from ctrl
   rpy_rpyrate_ = sys_A_.topLeftCorner<6,6>() * rpy_rpyrate_;
   rpy_rpyrate_.tail<1>() = cur_ctrlinput_.tail<1>(); 
-}
 
-void GenericFlyer::manager_process()
-{
-  const double dt = step_dt_;
-  const int dt_ms = std::round(dt*1000.0);
-  keep_alive_.test_and_set();
-  printf( "Starting manager process for: %s(%d) with dt: %dms\n", name_.c_str(), unique_id_, dt_ms );
+  /*  TRY CUSTOM "ERRORS" and state propagation effects here -------
+      posvelacc_.tail<3>() = -0.025*posvelacc_.tail<3>()
+                              + 0.8*cur_ctrlinput_.head<3>()
+                              + gvec + cur_extforces_;
+      posvelacc_.segment<3>(3) += step_dt_*posvelacc_.tail<3>();
+      posvelacc_.head<3>() += step_dt_*posvelacc_.segment<3>(3);
 
-  while( keep_alive_.test_and_set() )
-  {
-    if( is_ok_ )
-    {
-      moveRobot(dt);
-      //std::cout << posvelacc_.coeff(2) << ", ";
-      if( onGround() )
-        arrestMotion();
-
-      std::this_thread::sleep_for( std::chrono::milliseconds(dt_ms) );
-    }
-    else
-    {
-      setVelocity( Eigen::Vector3d::Zero() );
-      std::this_thread::sleep_for( std::chrono::milliseconds(2*dt_ms) );
-      is_ok_ = true;
-    }
-  }
-  printf( "Terminating manager proces for: %s(%d)\n", name_.c_str(), unique_id_ );
+  /*  if A.bottomRightCorner<3,3> is identity, B matrix can be
+   *   removed and use this step separately:
+   *     posvelacc_.tail<3>() = cur_ctrlinput_.head<3>() + cur_extforces_ + gvec;
+   */
 }
