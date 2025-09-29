@@ -65,6 +65,8 @@ class FreyjaSimulator : public rclcpp::Node
   bool enable_collisions_;
   bool enable_downwash_;
   bool publish_gt_curstate_;
+  bool publish_gt_extf_;
+  bool publish_gt_iface_;
 
   // some robot params
   double dw_ellipse_a_;     // ellipse-a [m] for downwash 
@@ -124,11 +126,12 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   declare_parameter<double>("topic_rate", 30.0);
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
   declare_parameter<int>( "team_id", 0 );
-  declare_parameter<std::string>( "robots_type", "diffdrive" );
+  declare_parameter<std::string>( "robot_type", "diffdrive" );
   declare_parameter<std::vector<double>>( "obst_pos_list", std::vector<double>({-1.0}) );
   declare_parameter<bool>( "enable_collisions", false );
   declare_parameter<bool>( "enable_downwash", false );
   declare_parameter<bool>( "publish_gt_curstate", false );
+  declare_parameter<bool>( "publish_gt_extf", false );
 
   declare_parameter<double>( "dwash_ellipse_a", 0.3 );
   declare_parameter<double>( "dwash_expo_ampl", 5.0 );
@@ -145,6 +148,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   get_parameter( "enable_collisions", enable_collisions_ );
   get_parameter( "enable_downwash", enable_downwash_ );
   get_parameter( "publish_gt_curstate", publish_gt_curstate_ );
+  get_parameter( "publish_gt_extf", publish_gt_extf_);
 
   get_parameter( "dwash_ellipse_a", dw_ellipse_a_ );
   get_parameter( "dwash_expo_ampl", dw_expo_ampl_ );
@@ -202,7 +206,8 @@ void FreyjaSimulator::create_robots(const std::string& _type)
   else if(_type == "aerial")
     create_flyers(uid_base);
   else
-    RCLCPP_ERROR(get_logger(), "Unknown robot type: {diffdrive, holo2d, aerial}?");
+    RCLCPP_ERROR(get_logger(), "Unknown robot type: %s ~ {diffdrive, holo2d, aerial}",
+                 _type.c_str());
 }
 
 void FreyjaSimulator::create_holo2d(int uid_base)
@@ -234,8 +239,11 @@ void FreyjaSimulator::create_holo2d(int uid_base)
                                 robots_[idx]->setCtrlInput( u.cast<double>() );
                               },
                               options );
-    if( publish_gt_curstate_ )
+    publish_gt_iface_ = false;
+    if(publish_gt_curstate_)
       simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
+    if(publish_gt_extf_)
+      extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
   }
 
   start_managers();
@@ -281,10 +289,17 @@ void FreyjaSimulator::create_flyers(int uid_base)
                               rp->success = true;
                               RCLCPP_WARN(get_logger(), "Arming: %s", rname.c_str());
                             } );         */
-    extf_pubs_[idx] = create_publisher<GeomVec3Stamped>( rname + "/ext_forces_gt", 1 );
-    iface_pubs_[idx] = create_publisher<FreyjaIfaceStatus>( rname + "/freyja_interface_status", 1 );
+    publish_gt_iface_ = true;
+    iface_pubs_[idx] = create_publisher<FreyjaIfaceStatus>
+                              (rname + "/freyja_interface_status", 1);
+
+    if(publish_gt_extf_)
+      extf_pubs_[idx] = create_publisher<GeomVec3Stamped>
+                              (rname + "/ext_forces_gt", 1);
+
     if( publish_gt_curstate_ )
-      simstate_pubs_[idx] = create_publisher<CurrentState>( rname + "/current_state_gt", 1 );
+      simstate_pubs_[idx] = create_publisher<CurrentState>
+                              (rname + "/current_state_gt", 1);
   }
   printf( "All robots created. Starting managers..\n" );
 
@@ -442,6 +457,7 @@ void FreyjaSimulator::simMainLoopTimer()
   static CurrentState cs_msg;
   static FreyjaIfaceStatus iface_msg;
 
+
   // make sure everyone is doing ok
   if( enable_collisions_ )
   {
@@ -501,12 +517,14 @@ void FreyjaSimulator::simMainLoopTimer()
       t.child_frame_id = robots_[idx]->name_;
       all_tforms_[idx] = t;
 
-      // publish known forces acting on the system
-      ext_f_msg.header.stamp = t_now;
-      ext_f_msg.vector.x = robot_extf.coeff(0);
-      ext_f_msg.vector.y = robot_extf.coeff(1);
-      ext_f_msg.vector.z = robot_extf.coeff(2);
-      extf_pubs_[idx] -> publish( ext_f_msg );
+      if(publish_gt_extf_)
+      {// publish known forces acting on the system
+        ext_f_msg.header.stamp = t_now;
+        ext_f_msg.vector.x = robot_extf.coeff(0);
+        ext_f_msg.vector.y = robot_extf.coeff(1);
+        ext_f_msg.vector.z = robot_extf.coeff(2);
+        extf_pubs_[idx] -> publish(ext_f_msg);
+      }
 
       // publish ground truth state-vector
       if( publish_gt_curstate_ )
@@ -534,7 +552,7 @@ void FreyjaSimulator::simMainLoopTimer()
     t_onehertz_upd = t_now;
   }
 
-  if( (t_now - t_iface_upd).seconds() > 0.1 )
+  if( publish_gt_iface_ && (t_now - t_iface_upd).seconds() > 0.1 )
   {
     for( int idx=0; idx < num_robots_; idx++ )
     {

@@ -28,7 +28,7 @@ launch:
       - { name: "team_id",              value:  0 }                 # common id for these robots
       - { name: "sim_rate",             value:  150.0 }             # main sim rate, robot sim at (fixed) high rate
       - { name: "topic_rate",           value:  120.0 }             # topics updated at this rate
-      - { name: "robots_type",          value:  "holonomic" }       # holonomic or diffdrive
+      - { name: "robot_type",           value:  "holo2d" }       # holonomic or diffdrive
       - { name: "enable_collisions",    value:  false }             # naive quadratic collision handling
       - { name: "obst_pos_list",        value:  [0.0, 0.0] }        # [pn,pe]*M
       - { name: "publish_gt_curstate",  value:  false }             # publish "current_state_gt" topic (note: we have tf already)
