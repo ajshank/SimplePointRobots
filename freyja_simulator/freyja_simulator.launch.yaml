@@ -1,7 +1,7 @@
 launch:
 - arg: { name: "team_namespace",      default: "" } 
 - arg: { name: "start_rviz",          default: "true" }
-
+- arg: { name: "robot_num_range",     default: "[101, 105]" }
 - node:
     pkg:  "tf2_ros"
     exec: "static_transform_publisher"
@@ -21,7 +21,7 @@ launch:
       output:     "screen"
       param:
       - { name: "platf_basename",       value: "R" }                # robot name prefix, "R", "cf" etc
-      - { name: "robot_num_range",      value:  [101, 105] }        # [i,j], robots named [{prefix}i..{prefix}j]
+      - { name: "robot_num_range",      value:  "$(var robot_num_range)" } # [i,j], robots named [{prefix}i..{prefix}j]
       - { name: "init_positions",       value:  [-2.0, 2.0, -1.5,
                                                -1.0, 1.0, -1.5] }   # [pn,pe,pd]*N, 3*N sized array; remaining robots init randomly
       - { name: "team_color",           value:  [0.7, 0.0, 0.0] }   # marker color, rgb
