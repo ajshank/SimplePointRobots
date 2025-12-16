@@ -24,6 +24,7 @@ launch:
       - { name: "platf_basename",       value: "R" }                # robot name prefix, "R", "cf" etc
       - { name: "robot_num_range",      value:  "$(var robot_num_range)" } # [i,j], robots named [{prefix}i..{prefix}j]
       - { name: "robot_type",           value:  "$(var robot_type)" }  # 'holo2d' 'diffdrive' 'aerial'
+      - { name: "autoarmed",            value:  true }              # robots armed already
       - { name: "init_positions",       value:  [-2.0, 2.0, -1.5,
                                                -1.0, 1.0, -1.5] }   # [pn,pe,pd]*N, 3*N sized array; remaining robots init randomly
       - { name: "team_color",           value:  [0.7, 0.0, 0.0] }   # marker color, rgb

@@ -62,6 +62,7 @@ class FreyjaSimulator : public rclcpp::Node
   // robots and managers
   std::vector<std::unique_ptr<GenericRobot>> robots_;
   std::vector<std::thread> robot_mgrs_;
+  bool start_autoarmed_;
   bool enable_collisions_;
   bool enable_downwash_;
   bool publish_gt_curstate_;
@@ -121,12 +122,14 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
 {
   declare_parameter<std::vector<long int>>( "robot_num_range", std::vector<long int>({3, 7}) );
   declare_parameter<std::string>("platf_basename", "R");
+  declare_parameter<std::string>( "robot_type", "diffdrive" );
   declare_parameter<std::vector<double>>( "init_positions", std::vector<double>({-2.0, 2.0, -3.0}) );
+  declare_parameter<bool>("autoarmed", false);
   declare_parameter<double>("sim_rate", 50.0);
   declare_parameter<double>("topic_rate", 30.0);
   declare_parameter<std::vector<double>>( "team_color", std::vector<double>({1.0, 0.0, 0.0}) );
   declare_parameter<int>( "team_id", 0 );
-  declare_parameter<std::string>( "robot_type", "diffdrive" );
+
   declare_parameter<std::vector<double>>( "obst_pos_list", std::vector<double>({-1.0}) );
   declare_parameter<bool>( "enable_collisions", false );
   declare_parameter<bool>( "enable_downwash", false );
@@ -142,6 +145,7 @@ FreyjaSimulator::FreyjaSimulator() : Node( "freyja_sim" )
   get_parameter( "robot_num_range", robot_num_range_ );
   get_parameter( "platf_basename", platf_basename_ );
   get_parameter( "init_positions", init_positions_ );
+  get_parameter( "autoarmed", start_autoarmed_ );
   get_parameter( "sim_rate", refresh_rate );
   get_parameter( "topic_rate", topic_rate );
   get_parameter( "obst_pos_list", obst_pos_list_ );
@@ -300,6 +304,8 @@ void FreyjaSimulator::create_flyers(int uid_base)
     if( publish_gt_curstate_ )
       simstate_pubs_[idx] = create_publisher<CurrentState>
                               (rname + "/current_state_gt", 1);
+    if( start_autoarmed_ )
+      robots_[idx]->set_arm(true);
   }
   printf( "All robots created. Starting managers..\n" );
 
